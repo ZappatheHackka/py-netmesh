@@ -11,7 +11,8 @@ class Node:
         self.process_thread = None
         self.stop_event = threading.Event()
         self.neighbors = {}
-        self.seen_messages = []
+        self.captured_packets = []
+        self.message_payloads = []
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "TEXT",
@@ -73,8 +74,8 @@ class Node:
                         elif message['node_id'] in self.neighbors:
                             time = datetime.datetime.now()
                             self.neighbors[message["node_id"]]["last_seen"] = time
-                            self.seen_messages.append(message)
-                            print("Message: ", message["payload"])
+                            self.captured_packets.append(message)
+                            self.message_payloads.append(message)
                         else:
                             print("Node ", message["node_id"], " has not been discovered. Adding ", message["node_id"],
                                   " to neighbors list.\n")
@@ -85,8 +86,8 @@ class Node:
                                 "alias": message["alias"],
                                 "last_seen": time
                             }
-                            self.seen_messages.append(message)
-                            print("Message: ", message["payload"])
+                            self.captured_packets.append(message)
+                            self.message_payloads.append(message)
                     else:
                         print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError:
