@@ -47,7 +47,6 @@ class Node:
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
-                message["port"] = message["port"]
                 print("Received message: ", message, " from ", addr, ". Adding to queue...\n")
                 self.packet_queue.put(message)
             except json.decoder.JSONDecodeError:
