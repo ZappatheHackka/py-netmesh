@@ -101,6 +101,7 @@ class Node:
         print("Node stopped cleanly.")
 
     def send_message(self, recipient_alias: str, message: str):
+        time.sleep(20)
         message = {
             "type": "CHAT",
             "alias": self.alias,
