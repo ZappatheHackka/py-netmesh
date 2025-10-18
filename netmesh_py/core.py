@@ -1,10 +1,11 @@
 import uuid, json, threading, socket, queue, datetime, time
 
 class Node:
-    def __init__(self, ip, port):
+    def __init__(self, ip: str, port: int):
         self.ip = ip
         self.port = port
         self.node_id = uuid.uuid4()
+        self.alias = None
         self.listen_thread = None
         self.discovery_thread = None
         self.process_thread = None
@@ -15,6 +16,7 @@ class Node:
         self.message_json = {
             "type": "TEXT",
             "origin": "netmesh_py",
+            "alias": None,
             "node_id": str(self.node_id),
             "ip": self.ip,
             "port": self.port,
@@ -24,6 +26,9 @@ class Node:
         }
 
     def start(self):
+        alias = input("Enter an alias for your node: ")
+        self.alias = alias
+        self.message_json["alias"] = self.alias
         self.listen_thread = threading.Thread(target=self.listener_loop)
         self.listen_thread.start()
 
@@ -78,6 +83,7 @@ class Node:
                             self.neighbors[message["node_id"]] = {
                                 "ip": message["ip"],
                                 "port": message["port"],
+                                "alias": message["alias"],
                                 "last_seen": time
                             }
                             self.seen_messages.append(message)
@@ -93,3 +99,34 @@ class Node:
         self.discovery_thread.join()
         self.processor_thread.join()
         print("Node stopped cleanly.")
+
+    def send_message(self, recipient_alias: str, message: str):
+        message = {
+            "type": "CHAT",
+            "alias": self.alias,
+            "origin": "netmesh_py",
+            "node_id": str(self.node_id),
+            "ip": self.ip,
+            "payload": {
+                "message": message
+            }
+        }
+
+        recipient_node = None
+
+        for node_id, info in self.neighbors.items():
+            if info.get("alias") == recipient_alias:
+                recipient_node = info
+                break
+
+        if recipient_node:
+            print("Recipient node found!")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
+            sock.close()
+            print(f"Sent direct message to {recipient_node['ip']}:{recipient_node['port']}")
+        else:
+            print("No known node with that alias.")
+
+
+
