@@ -51,12 +51,11 @@ class Node:
     #TODO: Add sending custom messages
     def discovery_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        peers = [50000, 50001]
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        print("Discovery thread now active...")
         while True:
-            for p in peers:
-                if p != self.port:
-                    sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('127.0.0.1', p))
-            time.sleep(3)
+            sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('<broadcast>', self.port))
+            time.sleep(5)
 
     def processor(self):
         print("Processor thread now active...")
