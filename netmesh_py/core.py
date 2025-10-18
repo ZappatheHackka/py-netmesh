@@ -5,13 +5,17 @@ class Node:
         self.ip = ip
         self.port = port
         self.node_id = uuid.uuid4()
+        self.listen_thread = None
+        self.discovery_thread = None
+        self.process_thread = None
+        self.stop_event = threading.Event()
         self.neighbors = {}
         self.seen_messages = []
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "TEXT",
             "origin": "netmesh_py",
-            "node_id": self.node_id,
+            "node_id": str(self.node_id),
             "ip": self.ip,
             "port": self.port,
             "payload": {
@@ -20,22 +24,25 @@ class Node:
         }
 
     def start(self):
-        listen_thread = threading.Thread(target=self.listener_loop)
-        listen_thread.start()
+        self.listen_thread = threading.Thread(target=self.listener_loop)
+        self.listen_thread.start()
 
-        discovery_thread = threading.Thread(target=self.discovery_loop)
-        discovery_thread.start()
+        self.discovery_thread = threading.Thread(target=self.discovery_loop)
+        self.discovery_thread.start()
 
-        processor_thread = threading.Thread(target=self.processor)
-        processor_thread.start()
+        self.processor_thread = threading.Thread(target=self.processor)
+        self.processor_thread.start()
 
     def listener_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((self.ip, self.port))
+        sock.bind(("", self.port))
+        print("Listening thread now active...")
         while True:
             data, addr = sock.recvfrom(1024)
             try:
                 message = json.loads(data.decode('utf-8'))
+                message["ip"] = addr[0]
+                message["port"] = addr[1]
                 print("Received message: ", message, " from ", addr, ". Adding to queue...\n")
                 self.packet_queue.put(message)
             except json.decoder.JSONDecodeError:
@@ -44,18 +51,23 @@ class Node:
     #TODO: Add sending custom messages
     def discovery_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        peers = [50000, 50001]
         while True:
-            sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('255.255.255.255', self.port))
+            for p in peers:
+                if p != self.port:
+                    sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('127.0.0.1', p))
             time.sleep(3)
 
     def processor(self):
+        print("Processor thread now active...")
         while True:
             message = self.packet_queue.get()
             try:
                 if message["origin"]:
                     if message["origin"] == "netmesh_py":
-                        if message['node_id'] in self.neighbors:
+                        if message['node_id'] == str(self.node_id):
+                            continue
+                        elif message['node_id'] in self.neighbors:
                             print("Node ", message["node_id"], " has already been discovered.\n")
                             time = datetime.datetime.now()
                             self.neighbors[message["node_id"]]["last_seen"] = time
@@ -65,8 +77,8 @@ class Node:
                                   " to neighbors list.\n")
                             time = datetime.datetime.now()
                             self.neighbors[message["node_id"]] = {
-                                "ip": self.ip,
-                                "port": self.port,
+                                "ip": message["ip"],
+                                "port": message["port"],
                                 "last_seen": time
                             }
                             self.seen_messages.append(message)
@@ -74,3 +86,11 @@ class Node:
                         print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError:
                 print("Message does not contain a 'origin' key. Ignoring...\n")
+
+    def stop(self):
+        print("Stopping node...")
+        self.stop_event.set()
+        self.listen_thread.join()
+        self.discovery_thread.join()
+        self.processor_thread.join()
+        print("Node stopped cleanly.")
