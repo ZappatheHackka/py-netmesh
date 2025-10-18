@@ -47,7 +47,7 @@ class Node:
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
-                message["port"] = addr[1]
+                message["port"] = message["port"]
                 print("Received message: ", message, " from ", addr, ". Adding to queue...\n")
                 self.packet_queue.put(message)
             except json.decoder.JSONDecodeError:
@@ -72,10 +72,10 @@ class Node:
                         if message['node_id'] == str(self.node_id):
                             continue
                         elif message['node_id'] in self.neighbors:
-                            print("Node ", message["node_id"], " has already been discovered.\n")
                             time = datetime.datetime.now()
                             self.neighbors[message["node_id"]]["last_seen"] = time
                             self.seen_messages.append(message)
+                            print("Message: ", message["payload"])
                         else:
                             print("Node ", message["node_id"], " has not been discovered. Adding ", message["node_id"],
                                   " to neighbors list.\n")
@@ -87,6 +87,7 @@ class Node:
                                 "last_seen": time
                             }
                             self.seen_messages.append(message)
+                            print("Message: ", message["payload"])
                     else:
                         print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError:
@@ -101,9 +102,9 @@ class Node:
         print("Node stopped cleanly.")
 
     def send_message(self, recipient_alias: str, message: str):
-        time.sleep(20)
+        time.sleep(15)
         message = {
-            "type": "CHAT",
+            "type": "TEXT",
             "alias": self.alias,
             "origin": "netmesh_py",
             "node_id": str(self.node_id),
