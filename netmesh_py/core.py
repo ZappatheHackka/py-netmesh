@@ -158,11 +158,11 @@ class Node:
                     elif cmd == "/quit":
                         print("Quitting...")
                         exit()
-                elif len(cmd) == 3:
+                elif len(cmd) >= 3:
                     if cmd[0] == "/msg":
                         try:
                             print("Attempting to send message...")
-                            self.send_message(recipient_alias=cmd[1], message=cmd[2])
+                            self.send_message(recipient_alias=cmd[1], message="".join(cmd[2:]))
                         except Exception as e:
                             print("Failed to send message. Error: ", e)
 
