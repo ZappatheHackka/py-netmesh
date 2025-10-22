@@ -29,7 +29,7 @@ class Node:
         }
 
     def start(self):
-        alias = input("Enter an alias for your node: ")
+        alias = input("Enter an alias for your node: ").strip()
         self.alias = alias
         self.message_json["alias"] = self.alias
         self.listen_thread = threading.Thread(target=self.listener_loop, daemon=True)
@@ -162,7 +162,7 @@ class Node:
                     if cmd[0] == "/msg":
                         try:
                             print("Attempting to send message...")
-                            self.send_message(recipient_alias=cmd[1], message="".join(cmd[2:]))
+                            self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
                         except Exception as e:
                             print("Failed to send message. Error: ", e)
 
