@@ -1,4 +1,6 @@
 import uuid, json, threading, socket, queue, datetime, time
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 
 class Node:
     def __init__(self, ip: str, port: int):
@@ -30,14 +32,16 @@ class Node:
         alias = input("Enter an alias for your node: ")
         self.alias = alias
         self.message_json["alias"] = self.alias
-        self.listen_thread = threading.Thread(target=self.listener_loop)
+        self.listen_thread = threading.Thread(target=self.listener_loop, daemon=True)
         self.listen_thread.start()
 
-        self.discovery_thread = threading.Thread(target=self.discovery_loop)
+        self.discovery_thread = threading.Thread(target=self.discovery_loop, daemon=True)
         self.discovery_thread.start()
 
-        self.processor_thread = threading.Thread(target=self.processor)
+        self.processor_thread = threading.Thread(target=self.processor, daemon=True)
         self.processor_thread.start()
+
+        self.user_interface()
 
     def listener_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -53,7 +57,6 @@ class Node:
             except json.decoder.JSONDecodeError:
                 print("Received message not in expected format. Ignoring...\n")
 
-    #TODO: Add sending custom messages
     def discovery_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -88,6 +91,8 @@ class Node:
                             }
                             self.captured_packets.append(message)
                             self.message_payloads.append(message)
+                        if message["recipient_alias"] == str(self.alias):
+                            print(f"DIRECT MESSAGE FROM {message["recipient_alias"]}: ", message["payload"]["message"])
                     else:
                         print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError:
@@ -106,6 +111,7 @@ class Node:
         message = {
             "type": "TEXT",
             "alias": self.alias,
+            "recipient": recipient_alias,
             "origin": "netmesh_py",
             "node_id": str(self.node_id),
             "ip": self.ip,
@@ -129,6 +135,28 @@ class Node:
             print(f"Sent direct message to {recipient_node['ip']}:{recipient_node['port']}")
         else:
             print("No known node with that alias.")
+
+    def user_interface(self):
+        print("Type /list to see nodes, /msg <alias> <text> to send, /quit to exit")
+        with patch_stdout():
+            p = PromptSession()
+            while True:
+                cmd = p.prompt("> ").strip()
+                cmd = cmd.split()
+                if len(cmd) == 1:
+                    cmd = "".join(cmd)
+                    if cmd == "/list":
+                        print(self.neighbors)
+                    elif cmd == "/quit":
+                        print("Quitting...")
+                        exit()
+                elif len(cmd) == 3:
+                    if cmd[0] == "/msg":
+                        try:
+                            print("Attempting to send message...")
+                            self.send_message(recipient_alias=cmd[1], message=cmd[2])
+                        except Exception as e:
+                            print("Failed to send message. Error: ", e)
 
 
 
