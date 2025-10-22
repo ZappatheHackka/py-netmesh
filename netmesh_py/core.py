@@ -1,4 +1,4 @@
-import uuid, json, threading, socket, queue, datetime, time
+import uuid, json, threading, socket, queue, datetime, time, logging
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -17,7 +17,7 @@ class Node:
         self.message_payloads = []
         self.packet_queue = queue.Queue()
         self.message_json = {
-            "type": "TEXT",
+            "type": "PROBE",
             "origin": "netmesh_py",
             "alias": None,
             "node_id": str(self.node_id),
@@ -52,10 +52,12 @@ class Node:
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
-                print("Received message: ", message, " from ", addr, ". Adding to queue...\n")
-                self.packet_queue.put(message)
+                if message["alias"] == self.alias:
+                    pass
+                else:
+                    self.packet_queue.put(message)
             except json.decoder.JSONDecodeError:
-                print("Received message not in expected format. Ignoring...\n")
+                continue
 
     def discovery_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -70,8 +72,14 @@ class Node:
         while True:
             message = self.packet_queue.get()
             try:
-                if message["origin"]:
-                    if message["origin"] == "netmesh_py":
+                if message["origin"] == "netmesh_py":
+                    if message["type"] == "CHAT":
+                        if message["recipient"] == str(self.alias):
+                            print(f"DIRECT MESSAGE FROM {message["alias"]}:", message["payload"]["message"])
+                        else:
+                            #flood algo, route to next best node
+                            pass
+                    elif message["type"] == "PROBE":
                         if message['node_id'] == str(self.node_id):
                             continue
                         elif message['node_id'] in self.neighbors:
@@ -80,8 +88,7 @@ class Node:
                             self.captured_packets.append(message)
                             self.message_payloads.append(message)
                         else:
-                            print("Node ", message["node_id"], " has not been discovered. Adding ", message["node_id"],
-                                  " to neighbors list.\n")
+                            print("New Node found:", message["node_id"], "AKA", message["alias"], ".")
                             time = datetime.datetime.now()
                             self.neighbors[message["node_id"]] = {
                                 "ip": message["ip"],
@@ -91,12 +98,13 @@ class Node:
                             }
                             self.captured_packets.append(message)
                             self.message_payloads.append(message)
-                        if message["recipient_alias"] == str(self.alias):
-                            print(f"DIRECT MESSAGE FROM {message["recipient_alias"]}: ", message["payload"]["message"])
-                    else:
-                        print("'origin' key is designates this message is foreign. Ignoring...\n")
-            except KeyError:
-                print("Message does not contain a 'origin' key. Ignoring...\n")
+                else:
+                    print("'origin' key is designates this message is foreign. Ignoring...\n")
+            except KeyError as e:
+                if e == "origin":
+                    pass # packet not of our mesh, do nothing
+                else:
+                    print("KeyError:", e)
 
     def stop(self):
         print("Stopping node...")
@@ -109,14 +117,14 @@ class Node:
     def send_message(self, recipient_alias: str, message: str):
         time.sleep(15)
         message = {
-            "type": "TEXT",
+            "type": "CHAT",
             "alias": self.alias,
             "recipient": recipient_alias,
             "origin": "netmesh_py",
             "node_id": str(self.node_id),
             "ip": self.ip,
             "payload": {
-                "message": message
+                "message": message.strip()
             }
         }
 
@@ -158,5 +166,11 @@ class Node:
                         except Exception as e:
                             print("Failed to send message. Error: ", e)
 
-
+    def _message_clean(self, message: dict) -> dict:
+        return {
+            "type": message["type"],
+            "alias": message["alias"],
+            "message": message["payload"]["message"],
+            "ip": message["ip"] + ":" + str(message["port"]),
+        }
 
