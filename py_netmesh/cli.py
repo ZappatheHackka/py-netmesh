@@ -21,5 +21,4 @@ def main():
         if args.command == "list-neighbors":
             print(node.neighbors)
         if args.command == "send":
-            # continue here
             pass

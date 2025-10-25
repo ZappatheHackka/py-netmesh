@@ -12,13 +12,15 @@ class Node:
         self.discovery_thread = None
         self.process_thread = None
         self.stop_event = threading.Event()
+        self.routing_table = {}
+        self.allowed_neighbors = []
         self.neighbors = {}
         self.captured_packets = []
         self.message_payloads = []
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "PROBE",
-            "origin": "netmesh_py",
+            "origin": "py_netmesh",
             "alias": None,
             "node_id": str(self.node_id),
             "ip": self.ip,
@@ -72,7 +74,7 @@ class Node:
         while True:
             message = self.packet_queue.get()
             try:
-                if message["origin"] == "netmesh_py":
+                if message["origin"] == "py_netmesh":
                     if message["type"] == "CHAT":
                         if message["recipient"] == str(self.alias):
                             print(f"DIRECT MESSAGE FROM {message["alias"]}:", message["payload"]["message"])
@@ -115,12 +117,11 @@ class Node:
         print("Node stopped cleanly.")
 
     def send_message(self, recipient_alias: str, message: str):
-        time.sleep(15)
         message = {
             "type": "CHAT",
             "alias": self.alias,
             "recipient": recipient_alias,
-            "origin": "netmesh_py",
+            "origin": "py_netmesh",
             "node_id": str(self.node_id),
             "ip": self.ip,
             "payload": {
@@ -145,7 +146,8 @@ class Node:
             print("No known node with that alias.")
 
     def user_interface(self):
-        print("Type /list to see nodes, /msg <alias> <text> to send, /quit to exit")
+        print("Type /list to see nodes, /msg <alias> <text> to send, /allow to update list of allowed neighbors, "
+              "/quit to exit")
         with patch_stdout():
             p = PromptSession()
             while True:
@@ -158,13 +160,17 @@ class Node:
                     elif cmd == "/quit":
                         print("Quitting...")
                         exit()
-                elif len(cmd) >= 3:
+                elif len(cmd) >= 2:
                     if cmd[0] == "/msg":
                         try:
                             print("Attempting to send message...")
                             self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
                         except Exception as e:
                             print("Failed to send message. Error: ", e)
+                    elif cmd[0] == "/allow":
+                        neighbors = cmd[1:]
+                        self.allow_neighbors(neighbors)
+                        print(f"Updated allowed neighbors list: {self.allowed_neighbors}.")
 
     def _message_clean(self, message: dict) -> dict:
         return {
@@ -174,3 +180,5 @@ class Node:
             "ip": message["ip"] + ":" + str(message["port"]),
         }
 
+    def allow_neighbors(self, neighbors: list[int]):
+        self.allowed_neighbors = neighbors
