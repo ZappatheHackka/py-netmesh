@@ -78,7 +78,7 @@ class Node:
                 if message["origin"] == "py_netmesh":
                     if message["type"] == "CHAT":
                         if message["recipient"] == str(self.alias):
-                            print(f"DIRECT MESSAGE FROM {message["alias"]}:", message["payload"]["message"])
+                            print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
                         else:
                             #flood algo, route to next best node
                             pass
