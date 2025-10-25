@@ -34,6 +34,7 @@ class Node:
         alias = input("Enter an alias for your node: ").strip()
         self.alias = alias
         self.message_json["alias"] = self.alias
+
         self.listen_thread = threading.Thread(target=self.listener_loop, daemon=True)
         self.listen_thread.start()
 
@@ -146,6 +147,8 @@ class Node:
             print("No known node with that alias.")
 
     def user_interface(self):
+        print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
+              f"ID: {self.node_id}")
         print("Type /list to see nodes, /msg <alias> <text> to send, /allow to update list of allowed neighbors, "
               "/quit to exit")
         with patch_stdout():
