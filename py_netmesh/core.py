@@ -12,9 +12,9 @@ class Node:
         self.discovery_thread = None
         self.process_thread = None
         self.stop_event = threading.Event()
-        self.routing_table = {}
         self.allowed_neighbors = []
-        self.neighbors = {}
+        self.routing_table = {}
+        self.routes_to_send = {}
         self.captured_packets = []
         self.message_payloads = []
         self.packet_queue = queue.Queue()
@@ -27,7 +27,8 @@ class Node:
             "port": self.port,
             "payload": {
                 "message": "KLAUS HAAS"
-            }
+            },
+            "routing_table": self.routes_to_send,
         }
 
     def start(self):
@@ -52,22 +53,31 @@ class Node:
         print("Listening thread now active...")
         while True:
             data, addr = sock.recvfrom(1024)
+            # print(f"[{self.port}] Received packet from {addr}")
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
                 if message["alias"] == self.alias:
-                    pass
+                    continue
                 else:
                     self.packet_queue.put(message)
             except json.decoder.JSONDecodeError:
                 continue
 
+
     def discovery_loop(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        print("Discovery thread now active...")
-        while True:
-            sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('<broadcast>', self.port))
+        # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # print("Discovery thread now active...")
+        # while True:
+        #     sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('<broadcast>', self.port))
+        #     time.sleep(5)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # For virtual testing
+        while not self.stop_event.is_set():
+            for neighbor_port in self.allowed_neighbors:
+                # print(f"[{self.port}] Sending discovery to {neighbor_port}")
+                sock.sendto(json.dumps(self.message_json).encode('utf-8'),
+                            ('127.0.0.1', neighbor_port))
             time.sleep(5)
 
     def processor(self):
@@ -77,30 +87,40 @@ class Node:
             try:
                 if message["origin"] == "py_netmesh":
                     if message["type"] == "CHAT":
-                        if message["recipient"] == str(self.alias):
+                        if message["destination_id"] == str(self.node_id):
                             print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
                         else:
                             #flood algo, route to next best node
                             pass
                     elif message["type"] == "PROBE":
-                        if message['node_id'] == str(self.node_id):
-                            continue
-                        elif message['node_id'] in self.neighbors:
-                            time = datetime.datetime.now()
-                            self.neighbors[message["node_id"]]["last_seen"] = time
-                            self.captured_packets.append(message)
-                            self.message_payloads.append(message)
+                        if message["port"] not in self.allowed_neighbors: #converting port to str because taking
+                            continue                                               #input from cli converts int to str
                         else:
-                            print("New Node found:", message["node_id"], "AKA", message["alias"], ".")
-                            time = datetime.datetime.now()
-                            self.neighbors[message["node_id"]] = {
-                                "ip": message["ip"],
-                                "port": message["port"],
-                                "alias": message["alias"],
-                                "last_seen": time
-                            }
-                            self.captured_packets.append(message)
-                            self.message_payloads.append(message)
+                            if str(message['node_id']) == str(self.node_id):
+                                continue
+                            elif message['node_id'] in self.routing_table:
+                                time = datetime.datetime.now()
+                                self.routing_table[message["node_id"]]["last_seen"] = time
+                                self.captured_packets.append(message)
+                                self.message_payloads.append(message)
+                            else:
+                                print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
+                                time = datetime.datetime.now()
+                                self.routing_table[message["node_id"]] = {
+                                    "ip": message["ip"],
+                                    "port": message["port"],
+                                    "alias": message["alias"],
+                                    "hop_count": 1,
+                                    "next_hop": None,
+                                    "last_seen": time
+                                }
+                                self.routes_to_send[message["node_id"]] = {
+                                    "alias": message["alias"],
+                                    "hop_count": 1,
+                                }
+                                self.scan_for_routes(routes=message["routing_table"])
+                                self.captured_packets.append(message)
+                                self.message_payloads.append(message)
                 else:
                     print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError as e:
@@ -122,6 +142,7 @@ class Node:
             "type": "CHAT",
             "alias": self.alias,
             "recipient": recipient_alias,
+            "destination_id": None,
             "origin": "py_netmesh",
             "node_id": str(self.node_id),
             "ip": self.ip,
@@ -132,19 +153,21 @@ class Node:
 
         recipient_node = None
 
-        for node_id, info in self.neighbors.items():
+        for node_id, info in self.routing_table.items():
             if info.get("alias") == recipient_alias:
                 recipient_node = info
                 break
 
         if recipient_node:
             print("Recipient node found!")
+            message["destination_id"] = recipient_node["node_id"]
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
             sock.close()
             print(f"Sent direct message to {recipient_node['ip']}:{recipient_node['port']}")
         else:
-            print("No known node with that alias.")
+            # consult routing table
+            pass
 
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
@@ -159,7 +182,7 @@ class Node:
                 if len(cmd) == 1:
                     cmd = "".join(cmd)
                     if cmd == "/list":
-                        print(self.neighbors)
+                        print(self.routing_table)
                     elif cmd == "/quit":
                         print("Quitting...")
                         exit()
@@ -175,13 +198,20 @@ class Node:
                         self.allow_neighbors(neighbors)
                         print(f"Updated allowed neighbors list: {self.allowed_neighbors}.")
 
-    def _message_clean(self, message: dict) -> dict:
-        return {
-            "type": message["type"],
-            "alias": message["alias"],
-            "message": message["payload"]["message"],
-            "ip": message["ip"] + ":" + str(message["port"]),
-        }
-
     def allow_neighbors(self, neighbors: list[int]):
-        self.allowed_neighbors = neighbors
+        self.allowed_neighbors = [int(port) for port in neighbors]
+
+    def scan_for_routes(self, routing_table: dict):
+        for node in routing_table:
+            if node == str(self.node_id):
+                continue
+            elif node not in self.routing_table:
+                self.routing_table[node] = {
+                    "alias": node["alias"],
+                    "hop_count": int(node["hop_count"]) + 1,
+                }
+            else:
+                if node["hop_count"] < self.routing_table[node]["hop_count"]:
+                    self.routing_table[node]["hop_count"] = node["hop_count"]
+                else:
+                    continue
