@@ -162,20 +162,20 @@ class Node:
 
         if recipient_node:
             print("Recipient node found!")
-            message["destination_id"] = recipient_node["node_id"]
+            message["destination_id"] = recipient_node["next_hop"]
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
             sock.close()
             print(f"Sent direct message to {recipient_node['ip']}:{recipient_node['port']}")
         else:
-            # consult routing table
+            # TODO How do we handle addresses we have no record of?
             pass
 
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
               f"ID: {self.node_id}")
-        print("Type /list to see nodes, /msg <alias> <text> to send, /allow to update list of allowed neighbors, "
-              "/quit to exit")
+        print("Type /list to see nodes, /msg <alias> <text> to send, /allow <port> to update list of allowed neighbors,"
+              " /quit to exit")
         with patch_stdout():
             p = PromptSession()
             while True:
@@ -195,7 +195,7 @@ class Node:
                             print("Attempting to send message...")
                             self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
                         except Exception as e:
-                            print("Failed to send message. Error: ", e)
+                            print(f"Failed to send message. Error: {e}")
                     elif cmd[0] == "/allow":
                         neighbors = cmd[1:]
                         self.allow_neighbors(neighbors)
