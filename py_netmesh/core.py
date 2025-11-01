@@ -13,7 +13,7 @@ class Node:
         self.process_thread = None
         self.stop_event = threading.Event()
         self.allowed_neighbors = []
-        self.routing_table = {}
+        self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
         self.captured_packets = []
         self.message_payloads = []
@@ -64,7 +64,6 @@ class Node:
             except json.decoder.JSONDecodeError:
                 continue
 
-
     def discovery_loop(self):
         # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -90,42 +89,45 @@ class Node:
                         if message["destination_id"] == str(self.node_id):
                             print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
                         else:
-                            #flood algo, route to next best node
+                            #TODO check if node_id in routing table, if not dfs for it
+                            if message["destination_id"] in self._routing_table:
+                                pass
                             pass
                     elif message["type"] == "PROBE":
-                        if message["port"] not in self.allowed_neighbors: #converting port to str because taking
-                            continue                                               #input from cli converts int to str
+                        if message["port"] not in self.allowed_neighbors:
+                            continue
                         else:
                             if str(message['node_id']) == str(self.node_id):
                                 continue
-                            elif message['node_id'] in self.routing_table:
+                            elif message['node_id'] in self._routing_table:
                                 time = datetime.datetime.now()
-                                self.routing_table[message["node_id"]]["last_seen"] = time
+                                self._routing_table[message["node_id"]]["last_seen"] = time
                                 self.captured_packets.append(message)
                                 self.message_payloads.append(message)
                             else:
                                 print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
                                 time = datetime.datetime.now()
-                                self.routing_table[message["node_id"]] = {
+                                self._routing_table[message["node_id"]] = {
                                     "ip": message["ip"],
                                     "port": message["port"],
                                     "alias": message["alias"],
                                     "hop_count": 1,
-                                    "next_hop": None,
+                                    "next_hop": message["node_id"],
                                     "last_seen": time
                                 }
                                 self.routes_to_send[message["node_id"]] = {
                                     "alias": message["alias"],
                                     "hop_count": 1,
                                 }
-                                self.scan_for_routes(routes=message["routing_table"])
+                                self.scan_for_routes(routing_table=message["routing_table"],
+                                                     parent_id=message["node_id"])
                                 self.captured_packets.append(message)
                                 self.message_payloads.append(message)
                 else:
                     print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError as e:
                 if e == "origin":
-                    pass # packet not of our mesh, do nothing
+                    continue # packet not of our mesh, move to next packet
                 else:
                     print("KeyError:", e)
 
@@ -153,7 +155,7 @@ class Node:
 
         recipient_node = None
 
-        for node_id, info in self.routing_table.items():
+        for node_id, info in self._routing_table.items():
             if info.get("alias") == recipient_alias:
                 recipient_node = info
                 break
@@ -182,9 +184,10 @@ class Node:
                 if len(cmd) == 1:
                     cmd = "".join(cmd)
                     if cmd == "/list":
-                        print(self.routing_table)
+                        print(self._routing_table)
                     elif cmd == "/quit":
                         print("Quitting...")
+                        self.stop()
                         exit()
                 elif len(cmd) >= 2:
                     if cmd[0] == "/msg":
@@ -201,17 +204,19 @@ class Node:
     def allow_neighbors(self, neighbors: list[int]):
         self.allowed_neighbors = [int(port) for port in neighbors]
 
-    def scan_for_routes(self, routing_table: dict):
+    def scan_for_routes(self, routing_table: dict, parent_id: str):
         for node in routing_table:
             if node == str(self.node_id):
                 continue
-            elif node not in self.routing_table:
-                self.routing_table[node] = {
-                    "alias": node["alias"],
-                    "hop_count": int(node["hop_count"]) + 1,
+            elif node not in self._routing_table:
+                self._routing_table[node] = {
+                    "alias": routing_table[node]["alias"],
+                    "hop_count": int(routing_table[node]["hop_count"]) + 1,
+                    "next_hop": parent_id,
                 }
             else:
-                if node["hop_count"] < self.routing_table[node]["hop_count"]:
-                    self.routing_table[node]["hop_count"] = node["hop_count"]
+                if routing_table[node]["hop_count"] < self._routing_table[node]["hop_count"]:
+                    self._routing_table[node]["hop_count"] = node["hop_count"]
+                    self._routing_table[node]["next_hop"] = parent_id
                 else:
                     continue
