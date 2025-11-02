@@ -1,6 +1,11 @@
-import uuid, json, threading, socket, queue, datetime, time, logging
+import base64
+import uuid, json, threading, socket, queue, datetime, time
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization, hashes
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+
+
 
 class Node:
     def __init__(self, ip: str, port: int):
@@ -17,6 +22,7 @@ class Node:
         self.routes_to_send = {}
         self.captured_packets = []
         self.message_payloads = []
+        self._private_key = None
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "PROBE",
@@ -25,6 +31,7 @@ class Node:
             "node_id": str(self.node_id),
             "ip": self.ip,
             "port": self.port,
+            "public_key": None,
             "payload": {
                 "message": "KLAUS HAAS"
             },
@@ -35,6 +42,7 @@ class Node:
         alias = input("Enter an alias for your node: ").strip()
         self.alias = alias
         self.message_json["alias"] = self.alias
+        self._generate_keys()
 
         self.listen_thread = threading.Thread(target=self.listener_loop, daemon=True)
         self.listen_thread.start()
@@ -140,6 +148,8 @@ class Node:
         print("Node stopped cleanly.")
 
     def send_message(self, recipient_alias: str, message: str):
+        message = message.strip()
+
         message = {
             "type": "CHAT",
             "alias": self.alias,
@@ -149,9 +159,13 @@ class Node:
             "node_id": str(self.node_id),
             "ip": self.ip,
             "payload": {
-                "message": message.strip()
-            }
+                "message": message,
+            },
+            "signature": None
         }
+
+        # TODO: Modularize into func: self.sign(message)
+        self._sign(message)
 
         recipient_node = None
 
@@ -220,3 +234,31 @@ class Node:
                     self._routing_table[node]["next_hop"] = parent_id
                 else:
                     continue
+
+# Internal methods
+    # Asymmetric keys
+    def _generate_keys(self):
+        self._private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+        )
+        public_key = self._private_key.public_key()
+        public_key_bytes = public_key.public_bytes(encoding=serialization.Encoding.PEM,
+                                format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+        public_key_string = public_key_bytes.decode('utf-8')
+
+        self.message_json["public_key"] = public_key_string
+
+    def _sign(self, message: dict):
+        payload = message["payload"] # do we need to serialize json if just str? keep for other file types later
+        json_string = json.dumps(payload, sort_keys=True)  # convert json to string
+        data_to_sign = json_string.encode('utf-8')  # serialize string into bytes for encryption
+
+        signature = self._private_key.sign(data_to_sign, padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ), hashes.SHA256())
+
+        string_signature = base64.b64encode(signature).decode('utf8')
+        message["signature"] = string_signature
