@@ -2,6 +2,7 @@ import base64
 import uuid, json, threading, socket, queue, datetime, time
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -22,7 +23,8 @@ class Node:
         self.routes_to_send = {}
         self.captured_packets = []
         self.message_payloads = []
-        self._private_key = None
+        self._private_key_obj = None
+        self._public_key_obj = None
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "PROBE",
@@ -95,9 +97,10 @@ class Node:
                 if message["origin"] == "py_netmesh":
                     if message["type"] == "CHAT":
                         if message["destination_id"] == str(self.node_id):
+                            # TODO: Reimplement this w/encryption. Search for public keys via node, decrypt
                             print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
                         else:
-                            #TODO check if node_id in routing table, if not dfs for it
+                            #TODO check if node_id in routing table
                             if message["destination_id"] in self._routing_table:
                                 pass
                             pass
@@ -115,17 +118,22 @@ class Node:
                             else:
                                 print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
                                 time = datetime.datetime.now()
+                                public_key = self._deserialize_pk(message['public_key'])
+
                                 self._routing_table[message["node_id"]] = {
                                     "ip": message["ip"],
                                     "port": message["port"],
                                     "alias": message["alias"],
                                     "hop_count": 1,
                                     "next_hop": message["node_id"],
+                                    "public_key": public_key,
                                     "last_seen": time
                                 }
+
                                 self.routes_to_send[message["node_id"]] = {
                                     "alias": message["alias"],
                                     "hop_count": 1,
+                                    "public_key": message["public_key"],
                                 }
                                 self.scan_for_routes(routing_table=message["routing_table"],
                                                      parent_id=message["node_id"])
@@ -148,24 +156,6 @@ class Node:
         print("Node stopped cleanly.")
 
     def send_message(self, recipient_alias: str, message: str):
-        message = message.strip()
-
-        message = {
-            "type": "CHAT",
-            "alias": self.alias,
-            "recipient": recipient_alias,
-            "destination_id": None,
-            "origin": "py_netmesh",
-            "node_id": str(self.node_id),
-            "ip": self.ip,
-            "payload": {
-                "message": message,
-            },
-            "signature": None
-        }
-
-        # TODO: Modularize into func: self.sign(message)
-        self._sign(message)
 
         recipient_node = None
 
@@ -176,7 +166,30 @@ class Node:
 
         if recipient_node:
             print("Recipient node found!")
-            message["destination_id"] = recipient_node["next_hop"]
+            destination_id = recipient_node["next_hop"]
+            message = message.strip()
+
+            message = {
+                "type": "CHAT",
+                "alias": self.alias,
+                "recipient": recipient_alias,
+                "destination_id": destination_id,
+                "origin": "py_netmesh",
+                "node_id": str(self.node_id),
+                "ip": self.ip,
+                "payload": {
+                    "message": message,
+                },
+                "signature": None
+            }
+
+            recipient_pk = recipient_node["public_key"]
+
+            encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
+            message["payload"] = encrypted_data
+
+            self._sign(message)
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
             sock.close()
@@ -236,13 +249,15 @@ class Node:
                     continue
 
 # Internal methods
+
     # Asymmetric keys
     def _generate_keys(self):
-        self._private_key = rsa.generate_private_key(
+        self._private_key_obj = rsa.generate_private_key(
             public_exponent=65537,
             key_size=2048,
         )
-        public_key = self._private_key.public_key()
+        public_key = self._private_key_obj.public_key()
+        self._public_key_obj = public_key
         public_key_bytes = public_key.public_bytes(encoding=serialization.Encoding.PEM,
                                 format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
@@ -250,15 +265,34 @@ class Node:
 
         self.message_json["public_key"] = public_key_string
 
+    def _encrypt_message(self, payload: dict, public_key):
+        json_string = json.dumps(payload, sort_keys=True)
+        payload_to_encrypt = json_string.encode('utf-8')
+
+        encrypted_text = public_key.encrypt(payload_to_encrypt,
+                                              padding.OAEP(
+                                                  mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                                                  algorithm=hashes.SHA256(),
+                                                  label=None
+                                              ))
+        encrypted_string = base64.b64encode(encrypted_text).decode('utf-8')
+        return encrypted_string
+
     def _sign(self, message: dict):
         payload = message["payload"] # do we need to serialize json if just str? keep for other file types later
         json_string = json.dumps(payload, sort_keys=True)  # convert json to string
         data_to_sign = json_string.encode('utf-8')  # serialize string into bytes for encryption
 
-        signature = self._private_key.sign(data_to_sign, padding.PSS(
+        signature = self._private_key_obj.sign(data_to_sign, padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
             salt_length=padding.PSS.MAX_LENGTH
         ), hashes.SHA256())
 
         string_signature = base64.b64encode(signature).decode('utf8')
         message["signature"] = string_signature
+
+    def _deserialize_pk(self, pk: str):
+        received_pub_key_string = pk
+        public_pem_data = received_pub_key_string.encode('utf-8')
+        public_key_object = load_pem_public_key(public_pem_data)
+        return public_key_object
