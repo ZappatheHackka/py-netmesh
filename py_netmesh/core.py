@@ -1,11 +1,9 @@
-import base64
-import uuid, json, threading, socket, queue, datetime, time
+import uuid, json, threading, socket, queue, datetime, time, base64
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
-
 
 
 class Node:
@@ -98,6 +96,16 @@ class Node:
                     if message["type"] == "CHAT":
                         if message["destination_id"] == str(self.node_id):
                             # TODO: Reimplement this w/encryption. Search for public keys via node, decrypt
+                            try:
+                                node_id = [node for node in self._routing_table if node == message["node_id"]]
+                                node = self._routing_table[node_id]
+                                public_key = node["public_key"]
+                                public_key.verify(message["signature"], message["payload"],
+                                                  padding.MGF1(algorithm=hashes.SHA256()), hashes.SHA256())
+                                plaintext = self._private_key_obj
+                            except Exception as e:
+                                print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+
                             print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
                         else:
                             #TODO check if node_id in routing table
@@ -133,7 +141,7 @@ class Node:
                                 self.routes_to_send[message["node_id"]] = {
                                     "alias": message["alias"],
                                     "hop_count": 1,
-                                    "public_key": message["public_key"],
+                                    "public_key": public_key,
                                 }
                                 self.scan_for_routes(routing_table=message["routing_table"],
                                                      parent_id=message["node_id"])
@@ -240,6 +248,7 @@ class Node:
                     "alias": routing_table[node]["alias"],
                     "hop_count": int(routing_table[node]["hop_count"]) + 1,
                     "next_hop": parent_id,
+                    "public_key": routing_table[node]["public_key"],
                 }
             else:
                 if routing_table[node]["hop_count"] < self._routing_table[node]["hop_count"]:
