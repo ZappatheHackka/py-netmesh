@@ -96,17 +96,15 @@ class Node:
                     if message["type"] == "CHAT":
                         if message["destination_id"] == str(self.node_id):
                             # TODO: Reimplement this w/encryption. Search for public keys via node, decrypt
-                            try:
-                                node_id = [node for node in self._routing_table if node == message["node_id"]]
-                                node = self._routing_table[node_id]
-                                public_key = node["public_key"]
-                                public_key.verify(message["signature"], message["payload"],
-                                                  padding.MGF1(algorithm=hashes.SHA256()), hashes.SHA256())
-                                plaintext = self._private_key_obj
-                            except Exception as e:
-                                print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+                            sender_id = message["node_id"]
+                            if sender_id in self._routing_table:
+                                try:
+                                    sender_info = self._routing_table[sender_id]
+                                    sender_public_key = sender_info["public_key"]
 
-                            print(f"DIRECT MESSAGE FROM {message['alias']}:", message['payload']['message'])
+                                except Exception as e:
+                                    print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+
                         else:
                             #TODO check if node_id in routing table
                             if message["destination_id"] in self._routing_table:
