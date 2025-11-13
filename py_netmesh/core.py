@@ -102,13 +102,51 @@ class Node:
                                     sender_info = self._routing_table[sender_id]
                                     sender_public_key = sender_info["public_key"]
 
+                                    # convert string back to bytes, remove b64 encoding
+                                    signature_bytes = base64.b64decode(message["signature"].encode('utf-8'))
+
+                                    # stringify payload dict for verification
+                                    data_to_verify = json.dumps(message["payload"], sort_keys=True).encode('utf-8')
+
+                                    sender_public_key.verify(
+                                        signature=signature_bytes,
+                                        data=data_to_verify,
+                                        padding=padding.PSS(
+                                            mgf=padding.MGF1(hashes.SHA256()),
+                                            salt_length=padding.PSS.MAX_LENGTH
+                                        ),
+                                        algorithm=hashes.SHA256()
+                                    )
+
+                                    encrypted_payload_string = message["payload"]
+
+                                    # again, convert back into bytes and remove b64 encoding
+                                    encrypted_payload_bytes = base64.b64decode(encrypted_payload_string.encode('utf-8'))
+
+                                    plaintext_bytes = self._private_key_obj.decrypt(
+                                        ciphertext=encrypted_payload_bytes,
+                                        padding=padding.OAEP(
+                                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                                            algorithm=hashes.SHA256(),
+                                            label=None
+                                        )
+                                    )
+
+                                    # return decrypted bytes to string for final decoded message
+                                    plaintext_string = plaintext_bytes.decode('utf-8')
+                                    original_payload_dict = json.loads(
+                                        plaintext_string)
+
+                                    print(f"DIRECT MESSAGE FROM {message['alias']}: {original_payload_dict['message']}")
+
                                 except Exception as e:
                                     print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
-
                         else:
-                            #TODO check if node_id in routing table
+                            #TODO check if node_id in routing table - make func that forwards to next hop
                             if message["destination_id"] in self._routing_table:
-                                pass
+                                next_node = self._routing_table[message["destination_id"]]
+                                next_hop = next_node["next_hop"]
+
                             pass
                     elif message["type"] == "PROBE":
                         if message["port"] not in self.allowed_neighbors:
@@ -273,7 +311,9 @@ class Node:
         self.message_json["public_key"] = public_key_string
 
     def _encrypt_message(self, payload: dict, public_key):
+        # convert json dict into flat, consistent string
         json_string = json.dumps(payload, sort_keys=True)
+        # convert string into bytes to be passed through network
         payload_to_encrypt = json_string.encode('utf-8')
 
         encrypted_text = public_key.encrypt(payload_to_encrypt,
@@ -282,19 +322,22 @@ class Node:
                                                   algorithm=hashes.SHA256(),
                                                   label=None
                                               ))
+        # convert post-encrypt bytes back into string. b64 for safety
         encrypted_string = base64.b64encode(encrypted_text).decode('utf-8')
         return encrypted_string
 
     def _sign(self, message: dict):
-        payload = message["payload"] # do we need to serialize json if just str? keep for other file types later
+        payload = message["payload"]
         json_string = json.dumps(payload, sort_keys=True)  # convert json to string
         data_to_sign = json_string.encode('utf-8')  # serialize string into bytes for encryption
 
+        # in its byte form, we create our salted signature
         signature = self._private_key_obj.sign(data_to_sign, padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
             salt_length=padding.PSS.MAX_LENGTH
         ), hashes.SHA256())
 
+        # decode utf-8 = convert from bytes back into string. base64 ensures all bytes are converted into safe chars
         string_signature = base64.b64encode(signature).decode('utf8')
         message["signature"] = string_signature
 
