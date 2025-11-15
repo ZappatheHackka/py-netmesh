@@ -60,8 +60,7 @@ class Node:
         sock.bind(("", self.port))
         print("Listening thread now active...")
         while True:
-            data, addr = sock.recvfrom(1024)
-            # print(f"[{self.port}] Received packet from {addr}")
+            data, addr = sock.recvfrom(4096)
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
@@ -69,7 +68,8 @@ class Node:
                     continue
                 else:
                     self.packet_queue.put(message)
-            except json.decoder.JSONDecodeError:
+            except Exception as e:
+                print(f"listener error: {e}, moving to next packet.")
                 continue
 
     def discovery_loop(self):
@@ -96,57 +96,17 @@ class Node:
                     if message["type"] == "CHAT":
                         if message["destination_id"] == str(self.node_id):
                             # TODO: Reimplement this w/encryption. Search for public keys via node, decrypt
-                            sender_id = message["node_id"]
-                            if sender_id in self._routing_table:
-                                try:
-                                    sender_info = self._routing_table[sender_id]
-                                    sender_public_key = sender_info["public_key"]
-
-                                    # convert string back to bytes, remove b64 encoding
-                                    signature_bytes = base64.b64decode(message["signature"].encode('utf-8'))
-
-                                    # stringify payload dict for verification
-                                    data_to_verify = json.dumps(message["payload"], sort_keys=True).encode('utf-8')
-
-                                    sender_public_key.verify(
-                                        signature=signature_bytes,
-                                        data=data_to_verify,
-                                        padding=padding.PSS(
-                                            mgf=padding.MGF1(hashes.SHA256()),
-                                            salt_length=padding.PSS.MAX_LENGTH
-                                        ),
-                                        algorithm=hashes.SHA256()
-                                    )
-
-                                    encrypted_payload_string = message["payload"]
-
-                                    # again, convert back into bytes and remove b64 encoding
-                                    encrypted_payload_bytes = base64.b64decode(encrypted_payload_string.encode('utf-8'))
-
-                                    plaintext_bytes = self._private_key_obj.decrypt(
-                                        ciphertext=encrypted_payload_bytes,
-                                        padding=padding.OAEP(
-                                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                                            algorithm=hashes.SHA256(),
-                                            label=None
-                                        )
-                                    )
-
-                                    # return decrypted bytes to string for final decoded message
-                                    plaintext_string = plaintext_bytes.decode('utf-8')
-                                    original_payload_dict = json.loads(
-                                        plaintext_string)
-
-                                    print(f"DIRECT MESSAGE FROM {message['alias']}: {original_payload_dict['message']}")
-
-                                except Exception as e:
-                                    print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+                            try:
+                                decrypted_message = self._decrypt_message(message=message)
+                                print(f"{message['alias']}: {decrypted_message['payload']['message']}")
+                            except Exception as e:
+                                print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+                                return None
                         else:
                             #TODO check if node_id in routing table - make func that forwards to next hop
                             if message["destination_id"] in self._routing_table:
                                 next_node = self._routing_table[message["destination_id"]]
-                                next_hop = next_node["next_hop"]
-
+                                self._forward_message(message=message, next_node=next_node)
                             pass
                     elif message["type"] == "PROBE":
                         if message["port"] not in self.allowed_neighbors:
@@ -177,9 +137,10 @@ class Node:
                                 self.routes_to_send[message["node_id"]] = {
                                     "alias": message["alias"],
                                     "hop_count": 1,
-                                    "public_key": public_key,
+                                    "public_key": message['public_key'],
+                                    "next_hop": message["node_id"],
                                 }
-                                self.scan_for_routes(routing_table=message["routing_table"],
+                                self._scan_for_routes(routing_table=message["routing_table"],
                                                      parent_id=message["node_id"])
                                 self.captured_packets.append(message)
                                 self.message_payloads.append(message)
@@ -189,7 +150,7 @@ class Node:
                 if e == "origin":
                     continue # packet not of our mesh, move to next packet
                 else:
-                    print("KeyError:", e)
+                    print("KeyError: ", e)
 
     def stop(self):
         print("Stopping node...")
@@ -208,8 +169,7 @@ class Node:
                 recipient_node = info
                 break
 
-        if recipient_node:
-            print("Recipient node found!")
+        if recipient_node is not None:
             destination_id = recipient_node["next_hop"]
             message = message.strip()
 
@@ -237,10 +197,9 @@ class Node:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
             sock.close()
-            print(f"Sent direct message to {recipient_node['ip']}:{recipient_node['port']}")
+            print(f"Sent message to {message['alias']}!")
         else:
-            # TODO How do we handle addresses we have no record of?
-            pass
+            print(f"Could not send message, node {recipient_alias} not in routing table.")
 
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
@@ -273,25 +232,11 @@ class Node:
                         print(f"Updated allowed neighbors list: {self.allowed_neighbors}.")
 
     def allow_neighbors(self, neighbors: list[int]):
-        self.allowed_neighbors = [int(port) for port in neighbors]
-
-    def scan_for_routes(self, routing_table: dict, parent_id: str):
-        for node in routing_table:
-            if node == str(self.node_id):
-                continue
-            elif node not in self._routing_table:
-                self._routing_table[node] = {
-                    "alias": routing_table[node]["alias"],
-                    "hop_count": int(routing_table[node]["hop_count"]) + 1,
-                    "next_hop": parent_id,
-                    "public_key": routing_table[node]["public_key"],
-                }
-            else:
-                if routing_table[node]["hop_count"] < self._routing_table[node]["hop_count"]:
-                    self._routing_table[node]["hop_count"] = node["hop_count"]
-                    self._routing_table[node]["next_hop"] = parent_id
-                else:
-                    continue
+        if len(self.allowed_neighbors) == 0:
+            self.allowed_neighbors = [int(port) for port in neighbors]
+        else:
+            new_neighbors = [int(port) for port in neighbors]
+            self.allowed_neighbors.extend(new_neighbors)
 
 # Internal methods
 
@@ -326,6 +271,66 @@ class Node:
         encrypted_string = base64.b64encode(encrypted_text).decode('utf-8')
         return encrypted_string
 
+    def _decrypt_message(self, message: dict):
+        sender_id = message["node_id"]
+        if sender_id in self._routing_table:
+            sender_info = self._routing_table[sender_id]
+            sender_public_key = sender_info["public_key"]
+
+            # convert string back to bytes, remove b64 encoding
+            signature_bytes = base64.b64decode(message["signature"].encode('utf-8'))
+
+            # stringify payload dict for verification
+            data_to_verify = json.dumps(message["payload"], sort_keys=True).encode('utf-8')
+
+            sender_public_key.verify(
+                signature=signature_bytes,
+                data=data_to_verify,
+                padding=padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                algorithm=hashes.SHA256()
+            )
+
+            encrypted_payload_string = message["payload"]
+
+            # again, convert back into bytes and remove b64 encoding
+            encrypted_payload_bytes = base64.b64decode(encrypted_payload_string.encode('utf-8'))
+
+            plaintext_bytes = self._private_key_obj.decrypt(
+                ciphertext=encrypted_payload_bytes,
+                padding=padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # return decrypted bytes to string for final decoded message
+            plaintext_string = plaintext_bytes.decode('utf-8')
+            original_payload_dict = json.loads(
+                plaintext_string)
+
+            message["payload"] = original_payload_dict
+
+            return message
+
+        else:
+            print(f"Sender not in routing table. Suspending decryption...")
+            return None
+
+    def _forward_message(self, next_node: dict, message: dict):
+        ip = next_node["ip"]
+        port = next_node["port"]
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(json.dumps(message).encode('utf-8'), (ip, port))
+            sock.close()
+            print(f"{self.alias} forwarded message to {next_node['alias']}. Message for {message['recipient']}")
+        except socket.error as e:
+            print(f"Could not forward message to {ip}:{port}. Error {e}")
+
     def _sign(self, message: dict):
         payload = message["payload"]
         json_string = json.dumps(payload, sort_keys=True)  # convert json to string
@@ -346,3 +351,24 @@ class Node:
         public_pem_data = received_pub_key_string.encode('utf-8')
         public_key_object = load_pem_public_key(public_pem_data)
         return public_key_object
+
+    def _scan_for_routes(self, routing_table: dict, parent_id: str):
+        for node in routing_table:
+            if node == str(self.node_id):
+                print("Routing table found")
+                continue
+            elif node not in self._routing_table.keys():
+                self._routing_table[node] = {
+                    "alias": routing_table[node]["alias"],
+                    "hop_count": int(routing_table[node]["hop_count"]) + 1,
+                    "next_hop": parent_id,
+                    "public_key": routing_table[node]["public_key"],
+                }
+                print(f"routing table: {self._routing_table}")
+            else:
+                if routing_table[node]["hop_count"] < self._routing_table[node]["hop_count"]:
+                    self._routing_table[node]["hop_count"] = node["hop_count"]
+                    self._routing_table[node]["next_hop"] = parent_id
+                else:
+                    print("nothing updated")
+                    continue
