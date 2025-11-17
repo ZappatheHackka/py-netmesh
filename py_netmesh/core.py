@@ -1,4 +1,4 @@
-import uuid, json, threading, socket, queue, datetime, time, base64
+import uuid, json, threading, socket, queue, datetime, time, base64, traceback
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -95,19 +95,17 @@ class Node:
                 if message["origin"] == "py_netmesh":
                     if message["type"] == "CHAT":
                         if message["destination_id"] == str(self.node_id):
-                            # TODO: Reimplement this w/encryption. Search for public keys via node, decrypt
                             try:
                                 decrypted_message = self._decrypt_message(message=message)
                                 print(f"{message['alias']}: {decrypted_message['payload']['message']}")
                             except Exception as e:
                                 print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
                                 return None
-                        else:
-                            #TODO check if node_id in routing table - make func that forwards to next hop
-                            if message["destination_id"] in self._routing_table:
-                                next_node = self._routing_table[message["destination_id"]]
-                                self._forward_message(message=message, next_node=next_node)
-                            pass
+                        #TODO check if node_id in routing table - make func that forwards to next hop
+                        elif message["destination_id"] is not None:
+                            next_node = self._find_node(alias=message["recipient"]) # ALIAS IS SENDER NOT RECP.
+                            self._forward_message(message=message, next_node=next_node)
+                            print(f"Message forwarded, alias is {message['recipient']}")
                     elif message["type"] == "PROBE":
                         if message["port"] not in self.allowed_neighbors:
                             continue
@@ -117,6 +115,8 @@ class Node:
                             elif message['node_id'] in self._routing_table:
                                 time = datetime.datetime.now()
                                 self._routing_table[message["node_id"]]["last_seen"] = time
+                                self._scan_for_routes(routing_table=message["routing_table"],
+                                                      parent_id=message["node_id"])
                                 self.captured_packets.append(message)
                                 self.message_payloads.append(message)
                             else:
@@ -162,42 +162,75 @@ class Node:
 
     def send_message(self, recipient_alias: str, message: str):
 
-        recipient_node = None
+        recipient_dict = {}
+        node_key = ""
 
         for node_id, info in self._routing_table.items():
             if info.get("alias") == recipient_alias:
-                recipient_node = info
+                recipient_dict[node_id] = info
+                node_key = node_id
                 break
 
-        if recipient_node is not None:
-            destination_id = recipient_node["next_hop"]
-            message = message.strip()
+        if recipient_dict != {} and node_key != "":
+            if recipient_dict[node_key]['hop_count'] == 1:
 
-            message = {
-                "type": "CHAT",
-                "alias": self.alias,
-                "recipient": recipient_alias,
-                "destination_id": destination_id,
-                "origin": "py_netmesh",
-                "node_id": str(self.node_id),
-                "ip": self.ip,
-                "payload": {
-                    "message": message,
-                },
-                "signature": None
-            }
+                message = message.strip()
 
-            recipient_pk = recipient_node["public_key"]
+                message = {
+                    "type": "CHAT",
+                    "alias": self.alias,
+                    "recipient": recipient_alias,
+                    "origin": "py_netmesh",
+                    "node_id": str(self.node_id),
+                    "destination_id": node_key,
+                    "ip": self.ip,
+                    "payload": {
+                        "message": message,
+                    },
+                    "signature": None
+                }
 
-            encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
-            message["payload"] = encrypted_data
+                recipient_pk = recipient_dict[node_key]["public_key"]
 
-            self._sign(message)
+                encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
+                message["payload"] = encrypted_data
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(json.dumps(message).encode('utf-8'), (recipient_node["ip"], recipient_node["port"]))
-            sock.close()
-            print(f"Sent message to {message['alias']}!")
+                self._sign(message)
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.sendto(json.dumps(message).encode('utf-8'),
+                            (recipient_dict[node_key]["ip"], recipient_dict[node_key]["port"]))
+                sock.close()
+                print(f"Sent message to {message['alias']}!")
+
+            elif recipient_dict[node_key]["hop_count"] > 1:
+                next_hop = recipient_dict[node_key]["next_hop"]
+
+                next_node = self._routing_table[next_hop]
+
+                message = {
+                    "type": "CHAT",
+                    "alias": self.alias,
+                    "recipient": recipient_alias,
+                    "origin": "py_netmesh",
+                    "node_id": str(self.node_id),
+                    "destination_id": node_key,
+                    "ip": self.ip,
+                    "payload": {
+                        "message": message,
+                    },
+                    "signature": None
+                }
+
+                recipient_pk = recipient_dict[node_key]["public_key"]
+
+                encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
+                message["payload"] = encrypted_data
+
+                self._sign(message)
+
+                self._forward_message(next_node=next_node, message=message)
+
         else:
             print(f"Could not send message, node {recipient_alias} not in routing table.")
 
@@ -226,6 +259,7 @@ class Node:
                             self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
                         except Exception as e:
                             print(f"Failed to send message. Error: {e}")
+                            traceback.print_exc()
                     elif cmd[0] == "/allow":
                         neighbors = cmd[1:]
                         self.allow_neighbors(neighbors)
@@ -261,6 +295,8 @@ class Node:
         # convert string into bytes to be passed through network
         payload_to_encrypt = json_string.encode('utf-8')
 
+
+        #TODO Handle nodes found via Probe routing table; their pub key is store as str not obj
         encrypted_text = public_key.encrypt(payload_to_encrypt,
                                               padding.OAEP(
                                                   mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -328,8 +364,8 @@ class Node:
             sock.sendto(json.dumps(message).encode('utf-8'), (ip, port))
             sock.close()
             print(f"{self.alias} forwarded message to {next_node['alias']}. Message for {message['recipient']}")
-        except socket.error as e:
-            print(f"Could not forward message to {ip}:{port}. Error {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred during forwarding: {e}")
 
     def _sign(self, message: dict):
         payload = message["payload"]
@@ -355,20 +391,27 @@ class Node:
     def _scan_for_routes(self, routing_table: dict, parent_id: str):
         for node in routing_table:
             if node == str(self.node_id):
-                print("Routing table found")
                 continue
-            elif node not in self._routing_table.keys():
+            elif node not in self._routing_table:
+                pk_object = self._deserialize_pk(routing_table[node]['public_key'])
                 self._routing_table[node] = {
                     "alias": routing_table[node]["alias"],
                     "hop_count": int(routing_table[node]["hop_count"]) + 1,
                     "next_hop": parent_id,
-                    "public_key": routing_table[node]["public_key"],
+                    "public_key": pk_object,
                 }
-                print(f"routing table: {self._routing_table}")
+                print(f"New node found via PROBE: {self._routing_table[node]['alias']}")
             else:
-                if routing_table[node]["hop_count"] < self._routing_table[node]["hop_count"]:
-                    self._routing_table[node]["hop_count"] = node["hop_count"]
+                if int(routing_table[node]["hop_count"]) < int(self._routing_table[node]["hop_count"]):
+                    self._routing_table[node]["hop_count"] = int(self._routing_table[node]["hop_count"])
                     self._routing_table[node]["next_hop"] = parent_id
                 else:
                     print("nothing updated")
                     continue
+
+    def _find_node(self, alias: str):
+        for node, info, in self._routing_table.items():
+            if info["alias"] == alias:
+                node = self._routing_table[node]
+                return node
+        print(f"No node found for: {alias}")
