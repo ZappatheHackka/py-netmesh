@@ -151,6 +151,7 @@ class Node:
                     continue # packet not of our mesh, move to next packet
                 else:
                     print("KeyError: ", e)
+                    traceback.print_exc()
 
     def stop(self):
         print("Stopping node...")
@@ -201,7 +202,7 @@ class Node:
                 sock.sendto(json.dumps(message).encode('utf-8'),
                             (recipient_dict[node_key]["ip"], recipient_dict[node_key]["port"]))
                 sock.close()
-                print(f"Sent message to {message['alias']}!")
+                print(f"Sent message to {message['recipient']}!")
 
             elif recipient_dict[node_key]["hop_count"] > 1:
                 next_hop = recipient_dict[node_key]["next_hop"]
@@ -400,18 +401,27 @@ class Node:
                     "next_hop": parent_id,
                     "public_key": pk_object,
                 }
+                self.routes_to_send[node] = {
+                    "alias": routing_table[node]["alias"],
+                    "hop_count": int(routing_table[node]["hop_count"]) + 1,
+                    "next_hop": parent_id,
+                    "public_key": routing_table[node]["public_key"],
+                }
                 print(f"New node found via PROBE: {self._routing_table[node]['alias']}")
             else:
                 if int(routing_table[node]["hop_count"]) < int(self._routing_table[node]["hop_count"]):
                     self._routing_table[node]["hop_count"] = int(self._routing_table[node]["hop_count"])
                     self._routing_table[node]["next_hop"] = parent_id
                 else:
-                    print("nothing updated")
                     continue
 
-    def _find_node(self, alias: str):
+    def _find_node(self, alias: str): # recursively search until next_hop == 1
         for node, info, in self._routing_table.items():
             if info["alias"] == alias:
                 node = self._routing_table[node]
-                return node
+                if node["next_hop"] == 1:
+                    return node
+                else:
+                    node = self._routing_table[node["next_hop"]]
+                    return node
         print(f"No node found for: {alias}")
