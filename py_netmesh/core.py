@@ -1,4 +1,4 @@
-import uuid, json, threading, socket, queue, datetime, time, base64, traceback
+import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -15,10 +15,12 @@ class Node:
         self.listen_thread = None
         self.discovery_thread = None
         self.process_thread = None
+        self.file_dir = None # directory incoming files will be stored at
         self.stop_event = threading.Event()
         self.allowed_neighbors = []
         self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
+        self._engine_registry = {}
         self.captured_packets = []
         self.message_payloads = []
         self._private_key_obj = None
@@ -53,6 +55,7 @@ class Node:
         self.processor_thread = threading.Thread(target=self.processor, daemon=True)
         self.processor_thread.start()
 
+        self.make_file_dir()
         self.user_interface()
 
     def listener_loop(self):
@@ -235,11 +238,55 @@ class Node:
         else:
             print(f"Could not send message, node {recipient_alias} not in routing table.")
 
+    def send_file(self, recipient_alias: str, file_path: pathlib.Path):
+        recipient_dict = {}
+        node_key = ""
+
+        for node_id, info in self._routing_table.items():
+            if info.get("alias") == recipient_alias:
+                recipient_dict[node_id] = info
+                node_key = node_id
+                break
+
+        if recipient_dict != {} and node_key != "":
+            file_transfer = FileTransfer()
+            file_id = str(uuid.uuid4())
+            engine = Engine()
+            engine._file_uuid = file_id
+            self._engine_registry[file_id] = engine
+
+            message = {
+                "type": "CHUNK",
+                "alias": self.alias,
+                "recipient": recipient_alias,
+                "origin": "py_netmesh",
+                "seq": 0,
+                "file_id": file_id,
+                "recipient_pk": recipient_dict[node_key]["public_key"],
+                "node_id": str(self.node_id),
+                "destination_id": node_key,
+                "ip": self.ip,
+                "payload": {
+                    "data": None
+                },
+                "signature": None
+            }
+
+
+            file_transfer.start(engine=engine, id=file_id, filepath=file_path, message_data=message)
+        else:
+            print(f"Cannot send file, alias {recipient_alias} not in routing table.")
+
+    def send_ack(self):
+        pass
+
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
-              f"ID: {self.node_id}")
-        print("Type /list to see nodes, /msg <alias> <text> to send, /allow <port> to update list of allowed neighbors,"
-              " /quit to exit")
+              f"ID: {self.node_id}\n")
+        print("Type /list to see nodes, /msg <alias> <text> to chat, /allow <port> to update list of allowed neighbors,"
+              " /send_file <alias> <filepath> to send files, /change_filedir <filepath> to change where incoming files "
+              "are received, and /quit to exit\n")
+        print(f"Your current directory is {pathlib.Path.cwd()}")
         with patch_stdout():
             p = PromptSession()
             while True:
@@ -265,6 +312,22 @@ class Node:
                         neighbors = cmd[1:]
                         self.allow_neighbors(neighbors)
                         print(f"Updated allowed neighbors list: {self.allowed_neighbors}.")
+                    elif cmd[0] == "/change_filedir":
+                        new_path = cmd[1]
+                        path = self.file_dir
+                        self.file_dir = new_path
+                        print(f"You will now receive files at {new_path} instead of {path}.")
+                    elif cmd[0] == "/send_file":
+                        recipient = cmd[1]
+                        filepath = cmd[2].strip("'\"")
+                        path = pathlib.Path(filepath).expanduser().resolve()
+                        if not path.exists():
+                            print(f"File {path} does not exist. Enter a different filepath and try again.")
+                        elif not path.is_file():
+                            print(f"File {path} does not point to a file. Enter a different filepath and try again.")
+                        else:
+                            print("Attempting to send file...")
+                            self.send_file(recipient_alias=recipient, file_path=path)
 
     def allow_neighbors(self, neighbors: list[int]):
         if len(self.allowed_neighbors) == 0:
@@ -425,3 +488,50 @@ class Node:
                     node = self._routing_table[node["next_hop"]]
                     return node
         print(f"No node found for: {alias}")
+
+    def make_file_dir(self):
+        path = pathlib.Path("../py_netmesh_received_files")
+        self.file_dir = path
+        self.file_dir.mkdir(parents=True, exist_ok=True)
+
+class Engine:
+    def __init__(self):
+        self._seq = 0
+        self._file_uuid = None
+        self.ack_received = threading.Event()
+
+    # How do we handle getting ACK messages? another queue? how do we feed specific ACKS to correct engine?
+    # Event() that replaces the loop bool, waits for ack to send next chunk
+
+    def process_chunks(self, filepath: str, message_data: dict):
+        chunk_size = 1024 * 1024
+        chunk = self.fetch_chunk(size=chunk_size, path=filepath)
+        encrypted_data = self.encrypt_chunk(chunk, message_data)
+
+    def fetch_chunk(self, size: int, path: str):
+        with open(file=path, mode="rb") as f:
+            while True:
+                chunk = f.read(size)
+                if not chunk:
+                    break
+                yield chunk
+
+    def send_chunk(self, chunk, recipient_alias: str):
+        pass
+        # here we will pull from a queue, loaded in the encrypt function below. Use Event() to send chunks relevant
+        # to ACK responses.
+
+    def encrypt_chunk(self, chunk, message_data: dict):
+        recipient_pk = message_data["recipient_pk"]
+        del message_data["recipient_pk"]
+        # we use symmetric enc here, because RSA enc has size limit beneath our 1mb threshold.
+        # we will first enc the chunks with AES, and then ecn the AES key with our Assym RSA key, like w/ strings
+
+class FileTransfer:
+    def __init__(self):
+        pass
+
+    def start(self, engine: Engine, id: str, filepath, message_data: dict):
+        engine._file_uuid = id
+        chunk_processing = threading.Thread(target=engine.process_chunks, args=(filepath, message_data),daemon=True)
+        chunk_processing.start()
