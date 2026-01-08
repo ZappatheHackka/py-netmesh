@@ -1,7 +1,9 @@
-import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os
+import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct
+from copy import deepcopy
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -20,7 +22,8 @@ class Node:
         self.allowed_neighbors = []
         self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
-        self._engine_registry = {}
+        self._engine_registry = {} # registry for file sending engines
+        self._thread_registry = {} # registry for threads of file sending operations
         self.captured_packets = []
         self.message_payloads = []
         self._private_key_obj = None
@@ -249,10 +252,8 @@ class Node:
                 break
 
         if recipient_dict != {} and node_key != "":
-            file_transfer = FileTransfer()
             file_id = str(uuid.uuid4())
             engine = Engine()
-            engine._file_uuid = file_id
             self._engine_registry[file_id] = engine
 
             message = {
@@ -260,9 +261,12 @@ class Node:
                 "alias": self.alias,
                 "recipient": recipient_alias,
                 "origin": "py_netmesh",
-                "seq": 0,
                 "file_id": file_id,
                 "recipient_pk": recipient_dict[node_key]["public_key"],
+                "filename": str(file_path.name),
+                "encrypted_session_key": None,
+                "nonce": None,
+                "session_key": None,
                 "node_id": str(self.node_id),
                 "destination_id": node_key,
                 "ip": self.ip,
@@ -272,8 +276,8 @@ class Node:
                 "signature": None
             }
 
-
-            file_transfer.start(engine=engine, id=file_id, filepath=file_path, message_data=message)
+            thread = engine.start(id=file_id ,filepath=file_path, message_data=message)
+            self._thread_registry[file_id] = thread
         else:
             print(f"Cannot send file, alias {recipient_alias} not in routing table.")
 
@@ -356,11 +360,11 @@ class Node:
     def _encrypt_message(self, payload: dict, public_key):
         # convert json dict into flat, consistent string
         json_string = json.dumps(payload, sort_keys=True)
-        # convert string into bytes to be passed through network
+        # convert string into bytes to encrypted
         payload_to_encrypt = json_string.encode('utf-8')
 
 
-        #TODO Handle nodes found via Probe routing table; their pub key is store as str not obj
+        #TODO [DONE] Handle nodes found via Probe routing table; their pub key is store as str not obj
         encrypted_text = public_key.encrypt(payload_to_encrypt,
                                               padding.OAEP(
                                                   mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -496,17 +500,50 @@ class Node:
 
 class Engine:
     def __init__(self):
-        self._seq = 0
-        self._file_uuid = None
+        self.seq = 0
+        self.file_uuid = None
         self.ack_received = threading.Event()
+        self.stop_sending = threading.Event()
+        self.chunk_queue = queue.Queue()
+
+    def start(self, id: str, filepath, message_data: dict):
+        self.file_uuid = id
+        chunk_processing = threading.Thread(target=self.process_chunks, args=(filepath, message_data),daemon=True)
+        chunk_processing.start()
+        return chunk_processing
 
     # How do we handle getting ACK messages? another queue? how do we feed specific ACKS to correct engine?
     # Event() that replaces the loop bool, waits for ack to send next chunk
 
     def process_chunks(self, filepath: str, message_data: dict):
+        self.file_uuid = message_data["file_id"]
         chunk_size = 1024 * 1024
-        chunk = self.fetch_chunk(size=chunk_size, path=filepath)
-        encrypted_data = self.encrypt_chunk(chunk, message_data)
+
+        session_key = AESGCM.generate_key(256)
+        public_key = message_data["recipient_pk"]
+        del message_data["recipient_pk"]
+        aesgcm = AESGCM(session_key)
+        encrypted_session_key = public_key.encrypt(session_key,
+                                                   padding.OAEP(
+                                                       mgf=padding.MGF1(hashes.SHA256()),
+                                                       algorithm=hashes.SHA256(),
+                                                       label=None
+                                                   )
+                                                )
+        message_data["session_key"] = base64.b64encode(encrypted_session_key).decode('utf8')
+
+        for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
+            data_to_send = deepcopy(message_data)
+            if self.stop_sending.is_set():
+                break
+            # TODO: only have one AES key, not new one each chunk
+            # TODO: add event to fetch_chunk so it wakes up upon ack
+            encrypted_message = self.encrypt_chunk(chunk, data_to_send, aesgcm)
+            self.chunk_queue.put(encrypted_message)
+            if self.seq > 0:
+                self.ack_received.wait()
+            self.send_chunk()
+            self.seq += 1
 
     def fetch_chunk(self, size: int, path: str):
         with open(file=path, mode="rb") as f:
@@ -516,22 +553,22 @@ class Engine:
                     break
                 yield chunk
 
-    def send_chunk(self, chunk, recipient_alias: str):
-        pass
-        # here we will pull from a queue, loaded in the encrypt function below. Use Event() to send chunks relevant
+    def send_chunk(self):
+        chunk = self.chunk_queue.get()
+        # here we will pull from a queue, loaded in after the encrypt function below. Use Event() to send chunks relevant
         # to ACK responses.
 
-    def encrypt_chunk(self, chunk, message_data: dict):
-        recipient_pk = message_data["recipient_pk"]
-        del message_data["recipient_pk"]
-        # we use symmetric enc here, because RSA enc has size limit beneath our 1mb threshold.
-        # we will first enc the chunks with AES, and then ecn the AES key with our Assym RSA key, like w/ strings
+    def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM):
+        # we use HYBRID enc here, because RSA enc has size limit beneath our 1mb threshold.
+        # we will first enc the chunks with AES Symm key, and then enc the AES key with our Assym RSA key, like w/ strings
+        # send enc symm key to recipient, which they will open with their private key
 
-class FileTransfer:
-    def __init__(self):
-        pass
+        nonce = os.urandom(12)
+        file_id = uuid.UUID(self.file_uuid).bytes
+        aad = struct.pack('!16sI', self.seq, file_id)
+        encrypted_chunk = aesgcm.encrypt(data=chunk, nonce=nonce, associated_data=aad)
 
-    def start(self, engine: Engine, id: str, filepath, message_data: dict):
-        engine._file_uuid = id
-        chunk_processing = threading.Thread(target=engine.process_chunks, args=(filepath, message_data),daemon=True)
-        chunk_processing.start()
+        message_data["payload"]["data"] = encrypted_chunk
+        return message_data
+
+# TODO(s) NEXT TIME: 1. Serialize dict for network transmission 2. create ack schema 3. finish stop-and-wait implementation on sender-side
