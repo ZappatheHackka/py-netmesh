@@ -1,5 +1,7 @@
 import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct
 from copy import deepcopy
+
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -22,8 +24,9 @@ class Node:
         self.allowed_neighbors = []
         self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
-        self._engine_registry = {} # registry for file sending engines
-        self._thread_registry = {} # registry for threads of file sending operations
+        self.sending_engine_registry = {} # registry for file sending engines
+        self.file_reception_registry = {} # how we track received keys, seq, etc for file assembly
+        self._thread_registry = {} # registry for threads of file sending operations, health checks etc
         self.captured_packets = []
         self.message_payloads = []
         self._private_key_obj = None
@@ -70,6 +73,7 @@ class Node:
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
+                #TODO: REMOVE
                 if message["alias"] == self.alias:
                     continue
                 else:
@@ -99,57 +103,23 @@ class Node:
             message = self.packet_queue.get()
             try:
                 if message["origin"] == "py_netmesh":
-                    if message["type"] == "CHAT":
-                        if message["destination_id"] == str(self.node_id):
-                            try:
-                                decrypted_message = self._decrypt_message(message=message)
-                                print(f"{message['alias']}: {decrypted_message['payload']['message']}")
-                            except Exception as e:
-                                print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
-                                return None
-                        #TODO check if node_id in routing table - make func that forwards to next hop
-                        elif message["destination_id"] is not None:
-                            next_node = self._find_node(alias=message["recipient"]) # ALIAS IS SENDER NOT RECP.
-                            self._forward_message(message=message, next_node=next_node)
-                            print(f"Message forwarded, alias is {message['recipient']}")
-                    elif message["type"] == "PROBE":
-                        if message["port"] not in self.allowed_neighbors:
-                            continue
-                        else:
-                            if str(message['node_id']) == str(self.node_id):
-                                continue
-                            elif message['node_id'] in self._routing_table:
-                                time = datetime.datetime.now()
-                                self._routing_table[message["node_id"]]["last_seen"] = time
-                                self._scan_for_routes(routing_table=message["routing_table"],
-                                                      parent_id=message["node_id"])
-                                self.captured_packets.append(message)
-                                self.message_payloads.append(message)
-                            else:
-                                print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
-                                time = datetime.datetime.now()
-                                public_key = self._deserialize_pk(message['public_key'])
-
-                                self._routing_table[message["node_id"]] = {
-                                    "ip": message["ip"],
-                                    "port": message["port"],
-                                    "alias": message["alias"],
-                                    "hop_count": 1,
-                                    "next_hop": message["node_id"],
-                                    "public_key": public_key,
-                                    "last_seen": time
-                                }
-
-                                self.routes_to_send[message["node_id"]] = {
-                                    "alias": message["alias"],
-                                    "hop_count": 1,
-                                    "public_key": message['public_key'],
-                                    "next_hop": message["node_id"],
-                                }
-                                self._scan_for_routes(routing_table=message["routing_table"],
-                                                     parent_id=message["node_id"])
-                                self.captured_packets.append(message)
-                                self.message_payloads.append(message)
+                    type = message['type']
+                    if type is not None:
+                        match type:
+                            case "PROBE":
+                                if message["port"] not in self.allowed_neighbors:
+                                    continue
+                                else:
+                                    if str(message['node_id']) == str(self.node_id):
+                                        continue
+                                    else:
+                                        self._handle_probe_packet(message=message)
+                            case "CHAT":
+                                self._handle_chat_message(message=message)
+                            case "CHUNK":
+                                self._handle_chunk_message(message=message)
+                    else:
+                        print("Processor detected py_netmesh packet 'type' key had value of Nonetype. DEBUG!!")
                 else:
                     print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError as e:
@@ -253,25 +223,31 @@ class Node:
 
         if recipient_dict != {} and node_key != "":
             file_id = str(uuid.uuid4())
+            routing_table_copy = deepcopy(self._routing_table)
             engine = Engine()
-            self._engine_registry[file_id] = engine
+            engine._routing_table = routing_table_copy
+            engine.recipient_dict = recipient_dict
+            engine.recipient_id = node_key
+            self.sending_engine_registry[file_id] = engine
 
             message = {
                 "type": "CHUNK",
                 "alias": self.alias,
                 "recipient": recipient_alias,
                 "origin": "py_netmesh",
-                "file_id": file_id,
                 "recipient_pk": recipient_dict[node_key]["public_key"],
-                "filename": str(file_path.name),
                 "encrypted_session_key": None,
                 "nonce": None,
                 "session_key": None,
                 "node_id": str(self.node_id),
                 "destination_id": node_key,
                 "ip": self.ip,
+                "file_id": file_id,
+                "seq": None,
+                "final": False,
                 "payload": {
-                    "data": None
+                    "data": None,
+                    "filename": str(file_path.name),
                 },
                 "signature": None
             }
@@ -284,6 +260,7 @@ class Node:
     def send_ack(self):
         pass
 
+# TODO: CLEAN UP
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
               f"ID: {self.node_id}\n")
@@ -304,6 +281,9 @@ class Node:
                         print("Quitting...")
                         self.stop()
                         exit()
+                    elif cmd == "/rts":
+                        print(f"PRIVATE ROUTING TABLE: {self._routing_table}\n"
+                              f"ROUTES TO SEND: {self.routes_to_send}")
                 elif len(cmd) >= 2:
                     if cmd[0] == "/msg":
                         try:
@@ -375,6 +355,101 @@ class Node:
         encrypted_string = base64.b64encode(encrypted_text).decode('utf-8')
         return encrypted_string
 
+    def _handle_chat_message(self, message: dict):
+        if message["destination_id"] == str(self.node_id):
+            try:
+                decrypted_message = self._decrypt_message(message=message)
+                print(f"{message['alias']}: {decrypted_message['payload']['message']}")
+            except Exception as e:
+                print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
+        # TODO check if node_id in routing table - make func that forwards to next hop
+        elif message["destination_id"] is not None:
+            next_node = self._find_node(alias=message["recipient"])  # ALIAS IS SENDER NOT RECP.
+            self._forward_message(message=message, next_node=next_node)
+            print(f"Message forwarded, alias is {message['recipient']}")
+
+    def _handle_probe_packet(self, message: dict):
+        if message['node_id'] in self._routing_table:
+            time = datetime.datetime.now()
+            self._routing_table[message["node_id"]]["last_seen"] = time
+            self._scan_for_routes(routing_table=message["routing_table"],
+                                  parent_id=message["node_id"])
+            self.captured_packets.append(message)
+            self.message_payloads.append(message)
+        else:
+            print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
+            time = datetime.datetime.now()
+            public_key = self._deserialize_pk(message['public_key'])
+
+            self._routing_table[message["node_id"]] = {
+                "ip": message["ip"],
+                "port": message["port"],
+                "alias": message["alias"],
+                "hop_count": 1,
+                "next_hop": message["node_id"],
+                "public_key": public_key,
+                "last_seen": time
+            }
+
+            self.routes_to_send[message["node_id"]] = {
+                "alias": message["alias"],
+                "hop_count": 1,
+                "public_key": message['public_key'],
+                "next_hop": message["node_id"],
+            }
+            self._scan_for_routes(routing_table=message["routing_table"],
+                                  parent_id=message["node_id"])
+            self.captured_packets.append(message)
+            self.message_payloads.append(message)
+
+    def _handle_chunk_message(self, message):
+        current_seq = 0 # compare this to incoming chunk seq, update accordingly
+        # deserialize
+        # decrypt
+        # assemble
+        if message["destination_id"] == str(self.node_id):
+            encrypted_payload = base64.b64decode(message["payload"])
+            nonce = base64.b64decode(message["nonce"])
+            seq = message["seq"]
+            file_id = message["file_id"]
+            if seq == 0:
+                session_key = message["session_key"]
+                decrypted_session_key = self._private_key_obj.decrypt(session_key,
+                                                                      padding.OAEP(
+                                                       mgf=padding.MGF1(hashes.SHA256()),
+                                                       algorithm=hashes.SHA256(),
+                                                       label=None
+                                                    )    )
+                self.file_reception_registry[file_id] = {}
+                self.file_reception_registry[file_id]["session_key"] = decrypted_session_key
+                self.file_reception_registry[file_id]["file_handle"] = None
+
+            self.file_reception_registry[file_id]["seq"] = seq
+
+            plaintext_json = self._decrypt_chunk(key=self.file_reception_registry[file_id]["session_key"],
+                                seq=self.file_reception_registry[file_id]["seq"],
+                                file_id=uuid.UUID(file_id).bytes, nonce=nonce,
+                                encrypted_payload=encrypted_payload)
+
+            filename = plaintext_json["payload"]["filename"]
+            self.file_reception_registry[file_id]["filename"] = filename
+            save_path = os.path.join(self.file_dir, filename)
+            plaintext_bytes = plaintext_json["payload"]["data"]
+
+            if self.file_reception_registry[file_id]["file_handle"] is None:
+                file_handle = open(save_path, "wb")
+                self.file_reception_registry[file_id]["file_handle"] = file_handle
+
+            file_handle = self.file_reception_registry[file_id]["file_handle"]
+            file_handle.write(plaintext_bytes)
+
+            if message["final"] is True:
+                pass # do all the ending memes here
+
+        else:
+            next_node = self._find_node(alias=message["recipient"])
+            self._forward_message(next_node=next_node, message=message)
+
     def _decrypt_message(self, message: dict):
         sender_id = message["node_id"]
         if sender_id in self._routing_table:
@@ -435,6 +510,20 @@ class Node:
         except Exception as e:
             print(f"An unexpected error occurred during forwarding: {e}")
 
+    def _decrypt_chunk(self, file_id, key, seq, nonce, encrypted_payload):
+        aad = struct.pack('!16sI', file_id, seq)
+        aesgcm = AESGCM(key)
+
+        try:
+            decrypted_bytes = aesgcm.decrypt(encrypted_payload, nonce, aad)
+            plaintext_data = decrypted_bytes.decode('utf-8')
+            plaintext_json = json.loads(plaintext_data)
+            return plaintext_json
+
+        except InvalidTag as e:
+            print(f"Could not decrypt file chunk {seq}. Error {e}")
+            return None
+
     def _sign(self, message: dict):
         payload = message["payload"]
         json_string = json.dumps(payload, sort_keys=True)  # convert json to string
@@ -482,11 +571,11 @@ class Node:
                 else:
                     continue
 
-    def _find_node(self, alias: str): # recursively search until next_hop == 1
+    def _find_node(self, alias: str): # search until hop_count == 1
         for node, info, in self._routing_table.items():
             if info["alias"] == alias:
                 node = self._routing_table[node]
-                if node["next_hop"] == 1:
+                if node["hop_count"] == 1:
                     return node
                 else:
                     node = self._routing_table[node["next_hop"]]
@@ -498,6 +587,7 @@ class Node:
         self.file_dir = path
         self.file_dir.mkdir(parents=True, exist_ok=True)
 
+# TODO work on forwarding file chunks
 class Engine:
     def __init__(self):
         self.seq = 0
@@ -505,6 +595,9 @@ class Engine:
         self.ack_received = threading.Event()
         self.stop_sending = threading.Event()
         self.chunk_queue = queue.Queue()
+        self.recipient_dict = {}
+        self._routing_table = {}
+        self.recipient_id = None
 
     def start(self, id: str, filepath, message_data: dict):
         self.file_uuid = id
@@ -516,8 +609,10 @@ class Engine:
     # Event() that replaces the loop bool, waits for ack to send next chunk
 
     def process_chunks(self, filepath: str, message_data: dict):
-        self.file_uuid = message_data["file_id"]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.file_uuid = message_data["payload"]["file_id"]
         chunk_size = 1024 * 1024
+        next_hop = self.find_next_hop()
 
         session_key = AESGCM.generate_key(256)
         public_key = message_data["recipient_pk"]
@@ -530,20 +625,28 @@ class Engine:
                                                        label=None
                                                    )
                                                 )
-        message_data["session_key"] = base64.b64encode(encrypted_session_key).decode('utf8')
+        message_data["session_key"] = base64.b64encode(encrypted_session_key).decode('utf-8')
 
         for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
             data_to_send = deepcopy(message_data)
+            data_to_send["seq"] = self.seq
             if self.stop_sending.is_set():
                 break
-            # TODO: only have one AES key, not new one each chunk
             # TODO: add event to fetch_chunk so it wakes up upon ack
-            encrypted_message = self.encrypt_chunk(chunk, data_to_send, aesgcm)
-            self.chunk_queue.put(encrypted_message)
+            encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
+            self.chunk_queue.put(encrypted_chunk_data)
+
             if self.seq > 0:
-                self.ack_received.wait()
-            self.send_chunk()
+                if not self.ack_received.wait(timeout=7.0):
+                    print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
+                    break
+                self.ack_received.clear()
+
+            self.send_chunk(next_hop=next_hop, sock=sock)
             self.seq += 1
+            if self.seq == 1:
+                del message_data["session_key"]
+            # TODO: add final wait after loop to ensure final chunk arrives
 
     def fetch_chunk(self, size: int, path: str):
         with open(file=path, mode="rb") as f:
@@ -553,22 +656,40 @@ class Engine:
                     break
                 yield chunk
 
-    def send_chunk(self):
-        chunk = self.chunk_queue.get()
+    def send_chunk(self, next_hop, sock):
         # here we will pull from a queue, loaded in after the encrypt function below. Use Event() to send chunks relevant
         # to ACK responses.
+        chunk_data = self.chunk_queue.get()
+        json_string = json.dumps(chunk_data, sort_keys=True)
+        json_bytes = json_string.encode('utf-8')
 
-    def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM):
+        sock.sendto(json_bytes, (next_hop["ip"], next_hop["port"]))
+
+    def confirm_ack(self, ack_seq: int):
+        sent_seq = self.seq - 1
+        if sent_seq == ack_seq:
+            self.ack_received.set()
+
+    def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
         # we use HYBRID enc here, because RSA enc has size limit beneath our 1mb threshold.
         # we will first enc the chunks with AES Symm key, and then enc the AES key with our Assym RSA key, like w/ strings
         # send enc symm key to recipient, which they will open with their private key
-
+        payload = message_data["payload"]
+        payload["data"] = base64.b64encode(chunk).decode('utf-8')
+        payload_bytes = json.dumps(payload).encode('utf-8')
         nonce = os.urandom(12)
+        message_data["nonce"] = base64.b64encode(nonce).decode('utf-8')
         file_id = uuid.UUID(self.file_uuid).bytes
-        aad = struct.pack('!16sI', self.seq, file_id)
-        encrypted_chunk = aesgcm.encrypt(data=chunk, nonce=nonce, associated_data=aad)
-
-        message_data["payload"]["data"] = encrypted_chunk
+        aad = struct.pack('!16sI', file_id, self.seq)
+        encrypted_payload = aesgcm.encrypt(data=payload_bytes, nonce=nonce, associated_data=aad)
+        encrypted_payload = base64.b64encode(encrypted_payload).decode('utf-8')
+        message_data["payload"] = encrypted_payload
         return message_data
 
-# TODO(s) NEXT TIME: 1. Serialize dict for network transmission 2. create ack schema 3. finish stop-and-wait implementation on sender-side
+    def find_next_hop(self):
+        next_hop = self.recipient_dict[self.recipient_id]["next_hop"]
+        next_node = self._routing_table[next_hop]
+        return next_node
+
+# TODO(s) NEXT TIME: 1. (DONE) Serialize dict for network transmission 2. (DONE) create ack schema
+#   3. finish stop-and-wait implementation on sender-side. 4. REMEMBER for recipient to save session key from FIRST chunk
