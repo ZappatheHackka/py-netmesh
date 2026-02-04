@@ -227,6 +227,7 @@ class Node:
 
         if recipient_dict != {} and node_key != "":
             file_id = str(uuid.uuid4())
+
             routing_table_copy = deepcopy(self._routing_table)
             engine = Engine()
             engine._routing_table = routing_table_copy
@@ -297,7 +298,6 @@ class Node:
                                 traceback.print_exc()
                         case "/allow":
                             neighbors = cmd[1:]
-                            neighbors = [int(neighbor) for neighbor in neighbors]
                             self.allow_neighbors(neighbors)
                             print(f"Updated allowed neighbors list: {self.allowed_neighbors}.")
                         case "/change_filedir":
@@ -318,11 +318,12 @@ class Node:
                                 self.send_file(recipient_alias=recipient, file_path=path)
 
     def allow_neighbors(self, neighbors: list[int]):
-        if len(self.allowed_neighbors) == 0:
-            self.allowed_neighbors = [int(port) for port in neighbors]
-        else:
-            new_neighbors = [int(port) for port in neighbors]
-            self.allowed_neighbors.extend(new_neighbors)
+        new_neighbors = [int(port) for port in neighbors]
+        for neighbor in new_neighbors:
+            if neighbor in self.allowed_neighbors:
+                print(f"Port {neighbor} is already allowed.")
+            else:
+                self.allowed_neighbors.append(neighbor)
 
 # Internal methods
 
@@ -383,7 +384,10 @@ class Node:
         else:
             print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
             time = datetime.datetime.now()
-            public_key = self._deserialize_pk(message['public_key'])
+
+            public_key = self._deserialize_pk(message['public_key']) # convert to bytes to avoid PICKLE ERROR from DEEPCOPY
+            serialized_pub_key = public_key.public_bytes(encoding=serialization.Encoding.PEM,
+                                                         format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
             self._routing_table[message["node_id"]] = {
                 "ip": message["ip"],
@@ -391,7 +395,7 @@ class Node:
                 "alias": message["alias"],
                 "hop_count": 1,
                 "next_hop": message["node_id"],
-                "public_key": public_key,
+                "public_key": serialized_pub_key,
                 "last_seen": time
             }
 
@@ -418,7 +422,8 @@ class Node:
                 file_id = message["file_id"]
                 if seq == 0:
                     session_key = message["session_key"]
-                    decrypted_session_key = self._private_key_obj.decrypt(session_key,
+                    key_bytes = base64.b64decode(session_key.encode('utf-8'))
+                    decrypted_session_key = self._private_key_obj.decrypt(key_bytes,
                                                                           padding.OAEP(
                                                            mgf=padding.MGF1(hashes.SHA256()),
                                                            algorithm=hashes.SHA256(),
@@ -427,43 +432,45 @@ class Node:
                     self.file_reception_registry[file_id] = {}
                     self.file_reception_registry[file_id]["session_key"] = decrypted_session_key
                     self.file_reception_registry[file_id]["file_handle"] = None
+                    self.file_reception_registry[file_id]["seq"] = 0
 
-                if seq != (self.file_reception_registry[file_id]["seq"] + 1):
-                    print(f"WARNING, incoming chunk is seq {seq}, while we are expecting "
-                          f"{(self.file_reception_registry[file_id]["seq"] + 1)}."
-                          f"\nStopping file send engine.")
-                    self._send_ack(message=message, file_id=file_id, status="seq_mismatch", final=False)
-                else:
-
-                    self.file_reception_registry[file_id]["seq"] = seq
-
-                    plaintext_json = self._decrypt_chunk(key=self.file_reception_registry[file_id]["session_key"],
-                                        seq=self.file_reception_registry[file_id]["seq"],
-                                        file_id=uuid.UUID(file_id).bytes, nonce=nonce,
-                                        encrypted_payload=encrypted_payload)
-
-                    filename = plaintext_json["payload"]["filename"]
-                    self.file_reception_registry[file_id]["filename"] = filename
-                    save_path = os.path.join(self.file_dir, filename)
-                    plaintext_bytes = plaintext_json["payload"]["data"]
-
-                    if self.file_reception_registry[file_id]["file_handle"] is None:
-                        file_handle = open(save_path, "wb")
-                        self.file_reception_registry[file_id]["file_handle"] = file_handle
-
-                    file_handle = self.file_reception_registry[file_id]["file_handle"]
-                    file_handle.write(plaintext_bytes)
-
-                    if message["final"] == True: # TODO: [DONE] Clean up file handles, clear up memory
-                        self._send_ack(message=message, file_id=file_id, final=True, status="ok")
-                        print(f"FILE RECEIVED: {filename} at {self.file_dir}/{filename} from {message['alias']}")
-                        file_handle.close()
-                        self.file_reception_registry[file_id]["file_handle"] = None
+                if seq > 0:
+                    if seq != (self.file_reception_registry[file_id]["seq"] + 1):
+                        print(f"WARNING, incoming chunk is seq {seq}, while we are expecting "
+                              f"{(self.file_reception_registry[file_id]["seq"] + 1)}."
+                              f"\nStopping file send engine.")
+                        self._send_ack(message=message, file_id=file_id, status="seq_mismatch", final=False)
                     else:
-                        self._send_ack(message=message, file_id=file_id, final=False, status="ok")
+                        self.file_reception_registry[file_id]["seq"] = seq
+
+                plaintext_json = self._decrypt_chunk(key=self.file_reception_registry[file_id]["session_key"],
+                                    seq=self.file_reception_registry[file_id]["seq"],
+                                    file_id=uuid.UUID(file_id).bytes, nonce=nonce,
+                                    encrypted_payload=encrypted_payload)
+
+                filename = plaintext_json["payload"]["filename"]
+                self.file_reception_registry[file_id]["filename"] = filename
+                save_path = os.path.join(self.file_dir, filename)
+                plaintext_bytes = plaintext_json["payload"]["data"]
+
+                if self.file_reception_registry[file_id]["file_handle"] is None:
+                    file_handle = open(save_path, "wb")
+                    self.file_reception_registry[file_id]["file_handle"] = file_handle
+
+                file_handle = self.file_reception_registry[file_id]["file_handle"]
+                file_handle.write(plaintext_bytes)
+
+                if message["final"] == True: # TODO: [DONE] Clean up file handles, clear up memory
+                    self._send_ack(message=message, file_id=file_id, final=True, status="ok")
+                    print(f"FILE RECEIVED: {filename} at {self.file_dir}/{filename} from {message['alias']}")
+                    file_handle.close()
+                    self.file_reception_registry[file_id]["file_handle"] = None
+                else:
+                    self._send_ack(message=message, file_id=file_id, final=False, status="ok")
 
             except Exception as e:
                 print(f"Could not process received chunk packet. Error {e}")
+                traceback.print_exc()
 
         elif message["destination_id"] is not None:
             next_node = self._find_node(alias=message["recipient"])
@@ -708,13 +715,13 @@ class Engine:
 
     def process_chunks(self, filepath: str, message_data: dict):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.file_uuid = message_data["payload"]["file_id"]
+        self.file_uuid = message_data["file_id"]
         chunk_size = 1024 * 1024
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
         next_hop = self.find_next_hop()
 
         session_key = AESGCM.generate_key(256)
-        public_key = message_data["recipient_pk"]
+        public_key = self._deserialize_pk(message_data["recipient_pk"])
         del message_data["recipient_pk"]
         aesgcm = AESGCM(session_key)
         encrypted_session_key = public_key.encrypt(session_key,
@@ -725,31 +732,32 @@ class Engine:
                                                    )
                                                 )
         session_key = base64.b64encode(encrypted_session_key).decode('utf-8')
-
-        while not self.stop_sending:
-            for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
-                if self.stop_sending:
-                    break
-                data_to_send = deepcopy(message_data)
-                data_to_send["session_key"] = session_key # add this after deepcopy to avoid PICKLING error
-                data_to_send["seq"] = self.seq
-                if data_to_send["seq"] == self.chunk_num:
-                    data_to_send["final"] = True
-                # TODO: [DONE] add event to fetch_chunk so it wakes up upon ack
-                encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
-                self.chunk_queue.put(encrypted_chunk_data)
-
-                if self.seq > 0:
-                    if not self.ack_received.wait(timeout=7.0):
-                        print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
+        while not self.stop_sending.is_set():
+            try:
+                for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
+                    if self.stop_sending.is_set():
                         break
-                    self.ack_received.clear()
+                    data_to_send = deepcopy(message_data)
+                    data_to_send["session_key"] = session_key # add this after deepcopy to avoid PICKLING error
+                    data_to_send["seq"] = self.seq
+                    if data_to_send["seq"] == self.chunk_num:
+                        data_to_send["final"] = True
+                    # TODO: [DONE] add event to fetch_chunk so it wakes up upon ack
+                    encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
+                    self.chunk_queue.put(encrypted_chunk_data)
+                    if self.seq > 0:
+                        if not self.ack_received.wait(timeout=7.0):
+                            print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
+                            break
+                        self.ack_received.clear()
 
-                self.send_chunk(next_hop=next_hop, sock=sock)
+                    self.send_chunk(next_hop=next_hop, sock=sock)
 
-                if self.seq == 0: # have session key ONLY in first chunk
-                    del message_data["session_key"]
-                self.seq += 1
+                    if self.seq == 0: # have session key ONLY in first chunk
+                        del message_data["session_key"]
+                    self.seq += 1
+            except Exception as e:
+                print(f"Chunk sending failed, error: {e}")
 
                 # TODO: [DONE-handled in processor] add final wait after loop to ensure final chunk arrives
 
@@ -799,6 +807,10 @@ class Engine:
     def number_of_chunks(self, filepath: str, chunk_size: int) -> int:
         file_size = os.path.getsize(filepath)
         return file_size // chunk_size
+
+    def _deserialize_pk(self, pk: bytes):
+        public_key_object = load_pem_public_key(pk)
+        return public_key_object
 
 # TODO(s) NEXT TIME: 1. (DONE) Serialize dict for network transmission 2. (DONE) create ack schema
 #   3. (DONE) finish stop-and-wait implementation on sender-side. 4. (DONE) REMEMBER for recipient to save session key from
