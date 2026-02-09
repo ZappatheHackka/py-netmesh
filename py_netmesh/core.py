@@ -1,4 +1,4 @@
-import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct
+import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct, math
 from copy import deepcopy
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -169,6 +169,7 @@ class Node:
                 }
 
                 recipient_pk = recipient_dict[node_key]["public_key"]
+                recipient_pk = self._serialize_pk(recipient_pk)
 
                 encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
                 message["payload"] = encrypted_data
@@ -201,6 +202,7 @@ class Node:
                 }
 
                 recipient_pk = recipient_dict[node_key]["public_key"]
+                recipient_pk = self._serialize_pk(recipient_pk)
 
                 encrypted_data = self._encrypt_message(payload=message["payload"], public_key=recipient_pk)
                 message["payload"] = encrypted_data
@@ -227,8 +229,8 @@ class Node:
 
         if recipient_dict != {} and node_key != "":
             file_id = str(uuid.uuid4())
-
             routing_table_copy = deepcopy(self._routing_table)
+
             engine = Engine()
             engine._routing_table = routing_table_copy
             engine.recipient_dict = recipient_dict
@@ -420,7 +422,7 @@ class Node:
                 nonce = base64.b64decode(message["nonce"])
                 seq = message["seq"]
                 file_id = message["file_id"]
-                if seq == 0:
+                if seq == 1:
                     session_key = message["session_key"]
                     key_bytes = base64.b64decode(session_key.encode('utf-8'))
                     decrypted_session_key = self._private_key_obj.decrypt(key_bytes,
@@ -432,9 +434,9 @@ class Node:
                     self.file_reception_registry[file_id] = {}
                     self.file_reception_registry[file_id]["session_key"] = decrypted_session_key
                     self.file_reception_registry[file_id]["file_handle"] = None
-                    self.file_reception_registry[file_id]["seq"] = 0
+                    self.file_reception_registry[file_id]["seq"] = 1
 
-                if seq > 0:
+                if seq > 1:
                     if seq != (self.file_reception_registry[file_id]["seq"] + 1):
                         print(f"WARNING, incoming chunk is seq {seq}, while we are expecting "
                               f"{(self.file_reception_registry[file_id]["seq"] + 1)}."
@@ -448,16 +450,17 @@ class Node:
                                     file_id=uuid.UUID(file_id).bytes, nonce=nonce,
                                     encrypted_payload=encrypted_payload)
 
-                filename = plaintext_json["payload"]["filename"]
+                filename = plaintext_json["filename"]
                 self.file_reception_registry[file_id]["filename"] = filename
                 save_path = os.path.join(self.file_dir, filename)
-                plaintext_bytes = plaintext_json["payload"]["data"]
+                plaintext_bytes = plaintext_json["data"]
 
                 if self.file_reception_registry[file_id]["file_handle"] is None:
                     file_handle = open(save_path, "wb")
                     self.file_reception_registry[file_id]["file_handle"] = file_handle
 
                 file_handle = self.file_reception_registry[file_id]["file_handle"]
+                plaintext_bytes = base64.b64decode(plaintext_bytes.encode('utf-8'))
                 file_handle.write(plaintext_bytes)
 
                 if message["final"] == True: # TODO: [DONE] Clean up file handles, clear up memory
@@ -477,23 +480,30 @@ class Node:
             self._forward_message(next_node=next_node, message=message)
 
     def _handle_ack_message(self, message): # TODO [DONE] prep for seq mismatch, [DONE] destroy engine if final ACK
-        if message["destination_id"] == str(self.node_id):
+        if str(message["destination_id"]) == str(self.node_id):
             decrypted_message = self._decrypt_message(message=message)
 
-            file_id = decrypted_message["payload"]["file_id"]
+            file_id = str(decrypted_message["payload"]["file_id"])
             engine = self.sending_engine_registry[file_id]
 
             if decrypted_message["payload"]["status"] == "seq_mismatch":
                 print(f"MISMATCHING SEQ DETECTED! FILE TRANSFER TO {message['alias']} CANCELLED.")
                 engine.stop_sending.set()
+                return
 
-            if decrypted_message["payload"]["final"] == True:
-                print(f"FILE SUCCESSFULLY SENT: {message["payload"]["filename"]}.\nFINAL ACK MESSAGE RECEIVED, "
-                      f"DESTROYING ENGINE WITH FILE ID {engine.file_uuid}")
-                engine = None
-                self.sending_engine_registry[file_id] = None
+            elif engine is None:
+                return
+            else:
+                engine.ack_received.set()
 
-            engine.ack_received.set()
+                if decrypted_message["payload"]["final"] == True:
+                    print(f"FILE SUCCESSFULLY SENT: {message["payload"]["filename"]}.\nFINAL ACK MESSAGE RECEIVED, "
+                          f"DESTROYING ENGINE RESPONSIBLE FOR FILE {message["payload"]["filename"]}")
+                    engine.stop_sending.set()
+                    engine = None
+                    self.sending_engine_registry[file_id] = None
+                    return
+
         else:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(message=message, next_node=next_node)
@@ -505,8 +515,8 @@ class Node:
             "alias": message["recipient"],
             "recipient": message["alias"],
             "origin": "py_netmesh",
-            "node_id": self.node_id,
-            "destination_id": message["destination_id"],
+            "node_id": str(self.node_id),
+            "destination_id": "",
             "ip": self.ip,
             "payload": {
                 "seq": message["seq"],
@@ -529,9 +539,13 @@ class Node:
                 break
 
         if recipient_dict != {} and node_key != "":
+
+            ack_message["destination_id"] = str(node_key)
+
             if recipient_dict[node_key]['hop_count'] == 1:
 
                 recipient_pk = recipient_dict[node_key]["public_key"]
+                recipient_pk = self._serialize_pk(recipient_pk)
 
                 encrypted_data = self._encrypt_message(payload=ack_message["payload"], public_key=recipient_pk)
                 ack_message["payload"] = encrypted_data
@@ -540,7 +554,7 @@ class Node:
                 sock.sendto(json.dumps(ack_message).encode('utf-8'),
                             (recipient_dict[node_key]["ip"], recipient_dict[node_key]["port"]))
                 sock.close()
-                print(f"Ack message for chunk {message["seq"]} to {message['recipient']}!")
+                print(f"Ack message for chunk {message["seq"]} sent to {message['alias']}!")
             else:
                 next_hop = recipient_dict[node_key]["next_hop"]
 
@@ -558,6 +572,7 @@ class Node:
         if sender_id in self._routing_table:
             sender_info = self._routing_table[sender_id]
             sender_public_key = sender_info["public_key"]
+            sender_public_key = self._serialize_pk(sender_public_key)
 
             # convert string back to bytes, remove b64 encoding
             # CHAT specific message signing verification
@@ -620,7 +635,7 @@ class Node:
         aesgcm = AESGCM(key)
 
         try:
-            decrypted_bytes = aesgcm.decrypt(encrypted_payload, nonce, aad)
+            decrypted_bytes = aesgcm.decrypt(data=encrypted_payload, nonce=nonce, associated_data=aad)
             plaintext_data = decrypted_bytes.decode('utf-8')
             plaintext_json = json.loads(plaintext_data)
             return plaintext_json
@@ -649,6 +664,10 @@ class Node:
         public_pem_data = received_pub_key_string.encode('utf-8')
         public_key_object = load_pem_public_key(public_pem_data)
         return public_key_object
+
+    def _serialize_pk(self, pk: bytes):
+        pub_key = load_pem_public_key(pk)
+        return pub_key
 
     def _scan_for_routes(self, routing_table: dict, parent_id: str):
         for node in routing_table:
@@ -688,13 +707,13 @@ class Node:
         print(f"No node found for: {alias}")
 
     def make_file_dir(self):
-        path = pathlib.Path("../py_netmesh_received_files")
+        path = pathlib.Path("py_netmesh_received_files")
         self.file_dir = path
         self.file_dir.mkdir(parents=True, exist_ok=True)
 
 class Engine:
     def __init__(self):
-        self.seq = 0
+        self.seq = 1
         self.chunk_num = 0
         self.file_uuid = None
         self.ack_received = threading.Event()
@@ -738,6 +757,7 @@ class Engine:
                     if self.stop_sending.is_set():
                         break
                     data_to_send = deepcopy(message_data)
+                    print(f"seq {self.seq}, chunk num {self.chunk_num}")
                     data_to_send["session_key"] = session_key # add this after deepcopy to avoid PICKLING error
                     data_to_send["seq"] = self.seq
                     if data_to_send["seq"] == self.chunk_num:
@@ -745,15 +765,19 @@ class Engine:
                     # TODO: [DONE] add event to fetch_chunk so it wakes up upon ack
                     encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
                     self.chunk_queue.put(encrypted_chunk_data)
-                    if self.seq > 0:
+                    if self.seq > 1:
                         if not self.ack_received.wait(timeout=7.0):
                             print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
                             break
                         self.ack_received.clear()
 
                     self.send_chunk(next_hop=next_hop, sock=sock)
+                    if data_to_send["final"] is True:
+                        print("Final chunk sent, halting engine...")
+                        self.stop_sending.set()
+                        break
 
-                    if self.seq == 0: # have session key ONLY in first chunk
+                    if self.seq == 1: # have session key ONLY in first chunk
                         del message_data["session_key"]
                     self.seq += 1
             except Exception as e:
@@ -806,7 +830,8 @@ class Engine:
 
     def number_of_chunks(self, filepath: str, chunk_size: int) -> int:
         file_size = os.path.getsize(filepath)
-        return file_size // chunk_size
+        print(f"CHUNK NUM CALC: {file_size} / {chunk_size}")
+        return math.ceil(file_size / chunk_size)
 
     def _deserialize_pk(self, pk: bytes):
         public_key_object = load_pem_public_key(pk)
