@@ -2,4 +2,6 @@
 env/
 .env
 *.pyc
-messages.txt
+m.txt
+agan.pdf
+*.pdf
