@@ -20,13 +20,12 @@ class Node:
         self.file_dir = None # directory incoming files will be stored at
         self.stop_event = threading.Event()
         self.allowed_neighbors = []
+        self._taken_aliases = []
         self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
         self.sending_engine_registry = {} # registry for file sending engines
         self.file_reception_registry = {} # how we track received keys, seq, etc for file assembly
         self._thread_registry = {} # registry for threads of file sending operations, health checks etc
-        self.captured_packets = []
-        self.message_payloads = []
         self._private_key_obj = None
         self._public_key_obj = None
         self.packet_queue = queue.Queue()
@@ -44,7 +43,7 @@ class Node:
             "routing_table": self.routes_to_send,
         }
 
-    def start(self):
+    def start(self): # TODO: How to handle duplicate aliases?
         alias = input("Enter an alias for your node: ").strip()
         self.alias = alias
         self.message_json["alias"] = self.alias
@@ -74,7 +73,6 @@ class Node:
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
-                #TODO: REMOVE
                 if message["alias"] == self.alias:
                     continue
                 else:
@@ -83,7 +81,7 @@ class Node:
                 print(f"listener error: {e}, moving to next packet.")
                 continue
 
-    def discovery_loop(self):
+    def discovery_loop(self): # TODO: Figure out final config for this
         # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         # print("Discovery thread now active...")
@@ -93,7 +91,6 @@ class Node:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # For virtual testing
         while not self.stop_event.is_set():
             for neighbor_port in self.allowed_neighbors:
-                # print(f"[{self.port}] Sending discovery to {neighbor_port}")
                 sock.sendto(json.dumps(self.message_json).encode('utf-8'),
                             ('127.0.0.1', neighbor_port))
             time.sleep(5)
@@ -130,7 +127,7 @@ class Node:
                     print("KeyError: ", e)
                     traceback.print_exc()
 
-    def stop(self):
+    def stop(self): # TODO: How to check if Node drops out / what to do then
         print("Stopping node...")
         self.stop_event.set()
         self.listen_thread.join()
@@ -217,7 +214,7 @@ class Node:
             else:
                 print(f"Could not send message, node {recipient_alias} not in routing table.")
 
-    def send_file(self, recipient_alias: str, file_path: pathlib.Path):
+    def send_file(self, recipient_alias: str, file_path: pathlib.Path): # TODO: Switch from JSON.dumps to struct.pack
         recipient_dict = {}
         node_key = ""
 
@@ -250,6 +247,7 @@ class Node:
                 "destination_id": node_key,
                 "ip": self.ip,
                 "file_id": file_id,
+                "hop_count": recipient_dict[node_key]["hop_count"],
                 "seq": None,
                 "final": False,
                 "payload": {
@@ -369,7 +367,6 @@ class Node:
                 print(f"{message['alias']}: {decrypted_message['payload']['message']}")
             except Exception as e:
                 print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
-        # TODO [DONE] check if node_id in routing table - make func that forwards to next hop
         elif message["destination_id"] is not None:
             next_node = self._find_node(alias=message["recipient"])  # ALIAS IS SENDER NOT RECP.
             self._forward_message(message=message, next_node=next_node)
@@ -381,8 +378,6 @@ class Node:
             self._routing_table[message["node_id"]]["last_seen"] = time
             self._scan_for_routes(routing_table=message["routing_table"],
                                   parent_id=message["node_id"])
-            self.captured_packets.append(message)
-            self.message_payloads.append(message)
         else:
             print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
             time = datetime.datetime.now()
@@ -409,8 +404,7 @@ class Node:
             }
             self._scan_for_routes(routing_table=message["routing_table"],
                                   parent_id=message["node_id"])
-            self.captured_packets.append(message)
-            self.message_payloads.append(message)
+            self._taken_aliases.append(message["alias"])
 
     def _handle_chunk_message(self, message):
         if message["destination_id"] == str(self.node_id):
@@ -422,6 +416,7 @@ class Node:
                 alias = message["alias"]
                 if seq == 1:
                     session_key = message["session_key"]
+                    window_size = message["window_size"]
                     key_bytes = base64.b64decode(session_key.encode('utf-8'))
                     decrypted_session_key = self._private_key_obj.decrypt(key_bytes,
                                                                           padding.OAEP(
@@ -431,47 +426,77 @@ class Node:
                                                         )    )
                     self.file_reception_registry[file_id] = {}
                     self.file_reception_registry[file_id]["session_key"] = decrypted_session_key
+                    self.file_reception_registry[file_id]["window_size"] = window_size
+                    self.file_reception_registry[file_id]["seq"] = seq
+                    self.file_reception_registry[file_id]["accepted_seq"] = 0
                     self.file_reception_registry[file_id]["file_handle"] = None
-                    self.file_reception_registry[file_id]["seq"] = 1
                     self.file_reception_registry[file_id]["alias"] = alias
+                    self.file_reception_registry[file_id]["chunks"] = []
 
                 aes_key = self.file_reception_registry[file_id]["session_key"]
+                window_size = self.file_reception_registry[file_id]["window_size"]
 
                 if seq > 1:
-                    if seq != (self.file_reception_registry[file_id]["seq"] + 1):
+                    if seq <= self.file_reception_registry[file_id]["seq"]:
+                        print(f"Lagging seq incoming. We have {self.file_reception_registry[file_id]['seq']}, incoming"
+                              f" is {seq}. Likely resent packets. Resending ACK...")
+                        # resend last ACK message here
+                        self._send_ack(message=self.file_reception_registry[file_id]["prev_chunk"],
+                                       seq=self.file_reception_registry[file_id]["accepted_seq"],
+                                       file_id=file_id, final=False, status="ok", key=aes_key)
+                        return
+                    elif seq != (self.file_reception_registry[file_id]["seq"] + 1):
                         print(f"WARNING, incoming chunk is seq {seq}, while we are expecting "
-                              f"{(self.file_reception_registry[file_id]["seq"] + 1)}."
-                              f"\nStopping file send engine.")
+                              f"{(self.file_reception_registry[file_id]["seq"] + 1)}.")
                         self._send_ack(message=message, file_id=file_id, status="seq_mismatch", final=False,
-                                       key=aes_key)
+                                       key=aes_key, seq=seq)
+                        return
                     else:
                         self.file_reception_registry[file_id]["seq"] = seq
+                        print(f"PACKET SEQ: {seq}, STORED SEQ: {self.file_reception_registry[file_id]["seq"]}")
+                        self.file_reception_registry[file_id]["accepted_seq"] = seq
 
                 plaintext_json = self._decrypt_chunk(key=self.file_reception_registry[file_id]["session_key"],
                                     seq=self.file_reception_registry[file_id]["seq"],
                                     file_id=uuid.UUID(file_id).bytes, nonce=nonce,
                                     encrypted_payload=encrypted_payload)
 
-                filename = plaintext_json["filename"]
-                self.file_reception_registry[file_id]["filename"] = filename
-                save_path = os.path.join(self.file_dir, filename)
+                if seq == 1:
+                    filename = plaintext_json["filename"]
+                    self.file_reception_registry[file_id]["filename"] = filename
+                    save_path = os.path.join(self.file_dir, filename)
+                    self.file_reception_registry[file_id]["save_path"] = save_path
+
+                save_path = self.file_reception_registry[file_id]["save_path"]
+                filename = self.file_reception_registry[file_id]["filename"]
+
                 plaintext_bytes = plaintext_json["data"]
+                plaintext_bytes = base64.b64decode(plaintext_bytes.encode('utf-8'))
 
                 if self.file_reception_registry[file_id]["file_handle"] is None:
                     file_handle = open(save_path, "wb")
                     self.file_reception_registry[file_id]["file_handle"] = file_handle
 
                 file_handle = self.file_reception_registry[file_id]["file_handle"]
-                plaintext_bytes = base64.b64decode(plaintext_bytes.encode('utf-8'))
-                file_handle.write(plaintext_bytes)
 
-                if message["final"] == True: # TODO: [DONE] Clean up file handles, clear up memory
-                    self._send_ack(message=message, file_id=file_id, final=True, status="ok", key=aes_key)
+                if seq % window_size != 0:
+                    self.file_reception_registry[file_id]["chunks"].append(plaintext_bytes)
+                elif seq % window_size == 0:
+                    self.file_reception_registry[file_id]["accepted_seq"] = seq
+                    self.file_reception_registry[file_id]["prev_chunk"] = message
+                    self.file_reception_registry[file_id]["chunks"].append(plaintext_bytes)
+                    file_handle.write(b"".join(self.file_reception_registry[file_id]["chunks"]))
+                    file_handle.flush()
+                    self.file_reception_registry[file_id]["chunks"] = []
+                    self._send_ack(message=message, file_id=file_id, final=False, status="ok", key=aes_key, seq=seq)
+
+                if message["final"] == True:
+                    self._send_ack(message=message, file_id=file_id, final=True, status="ok", key=aes_key, seq=seq)
                     print(f"FILE RECEIVED: {filename} at {self.file_dir}/{filename} from {message['alias']}")
+                    file_handle.write(b"".join(self.file_reception_registry[file_id]["chunks"]))
+                    file_handle.flush()
                     file_handle.close()
                     self.file_reception_registry[file_id]["file_handle"] = None
-                else:
-                    self._send_ack(message=message, file_id=file_id, final=False, status="ok", key=aes_key)
 
             except Exception as e:
                 print(f"Could not process received chunk packet. Error {e}")
@@ -481,7 +506,7 @@ class Node:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(next_node=next_node, message=message)
 
-    def _handle_ack_message(self, message): # TODO [DONE] prep for seq mismatch, [DONE] destroy engine if final ACK
+    def _handle_ack_message(self, message): # TODO: What do if SEQ mismatch?
         if str(message["destination_id"]) == str(self.node_id):
 
             nonce = message["nonce"]
@@ -493,7 +518,7 @@ class Node:
                     our_engines.add(engine)
 
             decrypted_payload = self._decrypt_ack(our_engines=our_engines, message=message)
-
+            print(f"ACK received with seq {decrypted_payload['seq']}")
             file_id = str(decrypted_payload["file_id"])
             engine = self.sending_engine_registry[file_id]
 
@@ -501,25 +526,23 @@ class Node:
                 print(f"MISMATCHING SEQ DETECTED! FILE TRANSFER TO {message['alias']} CANCELLED.")
                 engine.stop_sending.set()
                 return
-
-            elif engine is None:
-                return
             else:
-                engine.ack_received.set()
+                ack_seq = decrypted_payload["seq"]
+                engine.confirm_ack(ack_seq)
 
                 if decrypted_payload["final"] == True:
                     print(f"FILE SUCCESSFULLY SENT: {decrypted_payload["filename"]}.\nFINAL ACK MESSAGE RECEIVED, "
                           f"DESTROYING ENGINE RESPONSIBLE FOR FILE {decrypted_payload["filename"]}")
                     engine.stop_sending.set()
                     engine = None
-                    self.sending_engine_registry[file_id] = None
+                    del self.sending_engine_registry[file_id]
                     return
 
         else:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(message=message, next_node=next_node)
 
-    def _send_ack(self, message: dict, file_id: str, final: bool, status: str, key):
+    def _send_ack(self, message: dict, file_id: str, final: bool, status: str, seq: int, key):
 
         bytenonce = os.urandom(12) # urandom generates bytes, so we must make safe str
         nonce = base64.b64encode(bytenonce).decode("utf-8")
@@ -534,7 +557,7 @@ class Node:
             "ip": self.ip,
             "nonce": nonce,
             "payload": {
-                "seq": message["seq"],
+                "seq": seq,
                 "file_id": file_id,
                 "filename": str(self.file_reception_registry[file_id]["filename"]),
                 "status": status,
@@ -755,6 +778,8 @@ class Engine:
     def __init__(self):
         self.seq = 1
         self.chunk_num = 0
+        self.window_size = 0
+        self.current_window = {}
         self.file_uuid = None
         self.ack_received = threading.Event()
         self.stop_sending = threading.Event()
@@ -770,14 +795,18 @@ class Engine:
         chunk_processing.start()
         return chunk_processing
 
-    # How do we handle getting ACK messages? another queue? how do we feed specific ACKS to correct engine?
-    # Event() that replaces the loop bool, waits for ack to send next chunk
-
     def process_chunks(self, filepath: str, message_data: dict):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
+
         chunk_size = 5120
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
+
+        self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
+        print(f"WINDOW SIZE CALCULATED TO BE {self.window_size}")
+        message_data["window_size"] = self.window_size
+        del message_data["hop_count"]
+
         print(f"CHUNKS TO SEND: {self.chunk_num}")
         next_hop = self.find_next_hop()
 
@@ -797,7 +826,7 @@ class Engine:
                                                    )
                                                 )
         session_key = base64.b64encode(encrypted_session_key).decode('utf-8')
-        while not self.stop_sending.is_set():
+        while not self.stop_sending.is_set(): # how to loop in window_size???
             try:
                 for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
                     if self.stop_sending.is_set():
@@ -808,29 +837,37 @@ class Engine:
                     data_to_send["seq"] = self.seq
                     if data_to_send["seq"] == self.chunk_num:
                         data_to_send["final"] = True
-                    # TODO: [DONE] add event to fetch_chunk so it wakes up upon ack
+
                     encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
+                    self.current_window[self.seq] = encrypted_chunk_data
                     self.chunk_queue.put(encrypted_chunk_data)
+
                     if self.seq > 1:
-                        if not self.ack_received.wait(timeout=7.0):
-                            print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
-                            break
-                        self.ack_received.clear()
+                        if (self.seq - 1) % self.window_size == 0: # check if hit window size, THEN wait for ack
+                            if not self.ack_received.wait(timeout=2.0):
+                                print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
+                                print(f"Resending chunks {self.current_window.keys()}...")
+                                self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
+                                break
+                            else:
+                                self.ack_received.clear()
+                                self.current_window = {}
+
 
                     self.send_chunk(next_hop=next_hop, sock=sock)
                     if data_to_send["final"] is True:
                         print("Final chunk sent, halting engine...")
+                        print(f"WINDOW SIZE CALCULATED TO BE {self.window_size}")
                         self.stop_sending.set()
                         break
 
-                    if self.seq == 1: # have session key ONLY in first chunk
+                    if self.seq == 1:
                         del message_data["session_key"]
+                        del message_data["window_size"]
                     self.seq += 1
             except Exception as e:
                 print(f"Chunk sending failed, error: {e}")
                 traceback.print_exc()
-
-                # TODO: [DONE-handled in processor] add final wait after loop to ensure final chunk arrives
 
     def fetch_chunk(self, size: int, path: str):
         with open(file=path, mode="rb") as f:
@@ -849,10 +886,23 @@ class Engine:
 
         sock.sendto(json_bytes, (next_hop["ip"], next_hop["port"]))
 
+    def _resend_chunks(self, next_hop, sock, final: bool):
+        for chunk in self.current_window.values():
+            json_string = json.dumps(chunk, sort_keys=True)
+            json_bytes = json_string.encode('utf-8')
+            sock.sendto(json_bytes, (next_hop["ip"], next_hop["port"]))
+            if final is True:
+                print("Final chunk sent, halting engine...")
+                print(f"WINDOW SIZE CALCULATED TO BE {self.window_size}")
+                self.stop_sending.set()
+                break
+
     def confirm_ack(self, ack_seq: int):
         sent_seq = self.seq - 1
         if sent_seq == ack_seq:
             self.ack_received.set()
+        else:
+            print(f"ERROR: Tried to confirm ack. Engine sent chunk with seq {sent_seq}, but we just got {ack_seq}")
 
     def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
         # we use HYBRID enc here, because RSA enc has size limit beneath our 1mb threshold.
@@ -884,6 +934,11 @@ class Engine:
         public_key_object = load_pem_public_key(pk)
         return public_key_object
 
-# TODO(s) NEXT TIME: 1. (DONE) Serialize dict for network transmission 2. (DONE) create ack schema
-#   3. (DONE) finish stop-and-wait implementation on sender-side. 4. (DONE) REMEMBER for recipient to save session key from
-#   FIRST chunk
+    def _calc_window_size(self, hop_count: int) -> int:
+        if hop_count >= 3:
+            window_size = hop_count * 4
+            if window_size > 28:
+                window_size = 28
+        else:
+            window_size = hop_count * 8
+        return window_size + 2
