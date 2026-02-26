@@ -826,14 +826,14 @@ class Engine:
                                                    )
                                                 )
         session_key = base64.b64encode(encrypted_session_key).decode('utf-8')
-        while not self.stop_sending.is_set(): # how to loop in window_size???
+        while not self.stop_sending.is_set():
             try:
                 for chunk in self.fetch_chunk(size=chunk_size, path=filepath):
                     if self.stop_sending.is_set():
                         break
                     data_to_send = deepcopy(message_data)
                     print(f"seq {self.seq}, chunk num {self.chunk_num}")
-                    data_to_send["session_key"] = session_key # add this after deepcopy to avoid PICKLING error
+                    data_to_send["session_key"] = session_key
                     data_to_send["seq"] = self.seq
                     if data_to_send["seq"] == self.chunk_num:
                         data_to_send["final"] = True
@@ -847,7 +847,12 @@ class Engine:
                             if not self.ack_received.wait(timeout=2.0):
                                 print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
                                 print(f"Resending chunks {self.current_window.keys()}...")
+                                self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
+                                self.current_window = {}
+                                if not self.ack_received.wait(timeout=5.0):
+                                    print("Window resend failed. Canceling file transfer.")
+                                    self.stop_sending.set()
                                 break
                             else:
                                 self.ack_received.clear()
@@ -898,11 +903,10 @@ class Engine:
                 break
 
     def confirm_ack(self, ack_seq: int):
-        sent_seq = self.seq - 1
-        if sent_seq == ack_seq:
+        if ack_seq in self.current_window:
             self.ack_received.set()
         else:
-            print(f"ERROR: Tried to confirm ack. Engine sent chunk with seq {sent_seq}, but we just got {ack_seq}")
+            print(f"ERROR: ACK seq {ack_seq} not in current window {list(self.current_window.keys())}")
 
     def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
         # we use HYBRID enc here, because RSA enc has size limit beneath our 1mb threshold.
