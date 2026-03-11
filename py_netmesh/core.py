@@ -66,6 +66,7 @@ class Node:
 
     def listener_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4194304) # increase size of OS recv queue-prevent PL.
         sock.bind(("", self.port))
         print("Listening thread now active...")
         while True:
@@ -849,7 +850,6 @@ class Engine:
                                 print(f"Resending chunks {self.current_window.keys()}...")
                                 self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
-                                self.current_window = {}
                                 if not self.ack_received.wait(timeout=5.0):
                                     print("Window resend failed. Canceling file transfer.")
                                     self.stop_sending.set()
