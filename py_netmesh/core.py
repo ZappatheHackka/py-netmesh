@@ -61,6 +61,9 @@ class Node:
         self.processor_thread = threading.Thread(target=self.processor, daemon=True)
         self.processor_thread.start()
 
+        self.health_check_thread = threading.Thread(target=self.health_check_loop, daemon=True)
+        self.health_check_thread.start()
+
         self.make_file_dir()
         self.user_interface()
 
@@ -81,6 +84,18 @@ class Node:
             except Exception as e:
                 print(f"listener error: {e}, moving to next packet.")
                 continue
+
+    def health_check_loop(self):
+        while not self.stop_event.is_set():
+            now = datetime.datetime.now()
+            stale = [node_id for node_id, info in self._routing_table.items()
+                     if info.get("last_seen") and (now - info["last_seen"]).seconds > 10]
+            for node_id in stale:
+                print(f"Node {self._routing_table[node_id]['alias']} dropped from mesh.")
+                del self._routing_table[node_id]
+                if node_id in self.routes_to_send:
+                    del self.routes_to_send[node_id]
+            time.sleep(5)
 
     def discovery_loop(self): # TODO: Figure out final config for this
         # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -128,7 +143,7 @@ class Node:
                     print("KeyError: ", e)
                     traceback.print_exc()
 
-    def stop(self): # TODO: How to check if Node drops out / what to do then
+    def stop(self):
         print("Stopping node...")
         self.stop_event.set()
         self.listen_thread.join()
@@ -279,8 +294,8 @@ class Node:
                 if len(cmd) == 1:
                     cmd = "".join(cmd)
                     match cmd:
-                        case "/list":
-                            print(self._routing_table)
+                        case "/list": # refine for users
+                            print(self._routing_table.keys())
                         case "/quit":
                             print("Quitting...")
                             self.stop()
