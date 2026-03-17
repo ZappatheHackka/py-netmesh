@@ -800,7 +800,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 5120
+        chunk_size = 8192
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
