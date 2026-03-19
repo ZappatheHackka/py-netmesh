@@ -1,4 +1,4 @@
-import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct, math
+import uuid, json, threading, socket, queue, datetime, time, base64, traceback, pathlib, os, struct, math, signal
 from copy import deepcopy
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -20,6 +20,7 @@ class Node:
         self.file_dir = None # directory incoming files will be stored at
         self.stop_event = threading.Event()
         self.allowed_neighbors = []
+        self.neighbor_nodes = []
         self._taken_aliases = []
         self._routing_table = {} #internal use routing table
         self.routes_to_send = {}
@@ -49,6 +50,10 @@ class Node:
         self.message_json["alias"] = self.alias
         self.allowed_neighbors.append(self.port + 1)
         self.allowed_neighbors.append(self.port - 1)
+
+        # allows us to interpret OS signals on exit, and blast death packets after terminal closes
+        signal.signal(signal.SIGHUP, lambda s, f: self._announce_death())
+        signal.signal(signal.SIGTERM, lambda s, f: self._announce_death())
 
         self._generate_keys()
 
@@ -91,7 +96,7 @@ class Node:
             stale = [node_id for node_id, info in self._routing_table.items()
                      if info.get("last_seen") and (now - info["last_seen"]).seconds > 10]
             for node_id in stale:
-                print(f"Node {self._routing_table[node_id]['alias']} dropped from mesh.")
+                print(f"Can no longer reach Node {self._routing_table[node_id]['alias']}.")
                 del self._routing_table[node_id]
                 if node_id in self.routes_to_send:
                     del self.routes_to_send[node_id]
@@ -132,6 +137,8 @@ class Node:
                                 self._handle_chat_message(message=message)
                             case "CHUNK":
                                 self._handle_chunk_message(message=message)
+                            case "DEATH":
+                                self._handle_death_packet(message=message)
                     else:
                         print("Processor detected py_netmesh packet 'type' key had value of Nonetype. DEBUG!!")
                 else:
@@ -145,6 +152,7 @@ class Node:
 
     def stop(self):
         print("Stopping node...")
+        self._announce_death()
         self.stop_event.set()
         self.listen_thread.join()
         self.discovery_thread.join()
@@ -389,14 +397,13 @@ class Node:
             print(f"Message forwarded, alias is {message['recipient']}")
 
     def _handle_probe_packet(self, message: dict):
+        time = datetime.datetime.now()
         if message['node_id'] in self._routing_table:
-            time = datetime.datetime.now()
             self._routing_table[message["node_id"]]["last_seen"] = time
             self._scan_for_routes(routing_table=message["routing_table"],
-                                  parent_id=message["node_id"])
+                                  parent_id=message["node_id"], time=time)
         else:
-            print(f"New Node found: {message['node_id']} AKA {message['alias']}.")
-            time = datetime.datetime.now()
+            print(f"New Neighbor Node found: {message['alias']}.")
 
             public_key = self._deserialize_pk(message['public_key']) # convert to bytes to avoid PICKLE ERROR from DEEPCOPY
             serialized_pub_key = public_key.public_bytes(encoding=serialization.Encoding.PEM,
@@ -412,17 +419,20 @@ class Node:
                 "last_seen": time
             }
 
+            self.neighbor_nodes.append(message["alias"])
+
             self.routes_to_send[message["node_id"]] = {
                 "alias": message["alias"],
                 "hop_count": 1,
                 "public_key": message['public_key'],
                 "next_hop": message["node_id"],
             }
+
             self._scan_for_routes(routing_table=message["routing_table"],
-                                  parent_id=message["node_id"])
+                                  parent_id=message["node_id"], time=time)
             self._taken_aliases.append(message["alias"])
 
-    def _handle_chunk_message(self, message):
+    def _handle_chunk_message(self, message: dict):
         if message["destination_id"] == str(self.node_id):
             try:
                 encrypted_payload = base64.b64decode(message["payload"])
@@ -522,7 +532,7 @@ class Node:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(next_node=next_node, message=message)
 
-    def _handle_ack_message(self, message): # TODO: What do if SEQ mismatch?
+    def _handle_ack_message(self, message: dict): # TODO: What do if SEQ mismatch?
         if str(message["destination_id"]) == str(self.node_id):
 
             nonce = message["nonce"]
@@ -557,6 +567,52 @@ class Node:
         else:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(message=message, next_node=next_node)
+
+    def _handle_death_packet(self, message: dict):
+        if message["id"] == str(self.node_id):
+            pass
+        else:
+            if message["id"] in self._routing_table.keys() and message["id"] in self.routes_to_send.keys():
+
+                print(f"NODE DEATH DETECTED: {message['alias']} has left the mesh.")
+                print("Other nodes may now be unreachable.")
+
+                del self._routing_table[message["id"]]
+                del self.routes_to_send[message["id"]]
+
+                json_string = json.dumps(message, sort_keys=True).encode("utf-8")
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+                for node in self.neighbor_nodes:
+                    try:
+                        if node == message["alias"]:
+                            continue
+                        neighbor = self._find_node(node)
+                        sock.sendto(json_string, (neighbor["ip"], neighbor["port"]))
+                    except TypeError:
+                        pass
+            else:
+                pass
+
+    def _announce_death(self): # for node dropout announcements
+        message = {
+            "type": "DEATH",
+            "origin": "py_netmesh",
+            "id": str(self.node_id),
+            "alias": self.alias,
+        }
+
+        json_string = json.dumps(message, sort_keys=True).encode("utf-8")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        for node in self.neighbor_nodes:
+            try:
+                neighbor = self._find_node(node)
+                sock.sendto(json_string, (neighbor["ip"], neighbor["port"]))
+            except TypeError:
+                pass
 
     def _send_ack(self, message: dict, file_id: str, final: bool, status: str, seq: int, key):
 
@@ -749,7 +805,7 @@ class Node:
         pub_key = load_pem_public_key(pk)
         return pub_key
 
-    def _scan_for_routes(self, routing_table: dict, parent_id: str):
+    def _scan_for_routes(self, routing_table: dict, parent_id: str, time: datetime):
         for node in routing_table:
             if node == str(self.node_id):
                 continue
@@ -759,6 +815,7 @@ class Node:
                     "hop_count": int(routing_table[node]["hop_count"]) + 1,
                     "next_hop": parent_id,
                     "public_key": routing_table[node]["public_key"],
+                    "last_seen": time
                 }
                 self.routes_to_send[node] = {
                     "alias": routing_table[node]["alias"],
@@ -766,8 +823,9 @@ class Node:
                     "next_hop": parent_id,
                     "public_key": routing_table[node]["public_key"],
                 }
-                print(f"New node found via PROBE: {self._routing_table[node]['alias']}")
+                print(f"New Node found via PROBE: {self._routing_table[node]['alias']}")
             else:
+                self._routing_table[node]["last_seen"] = time
                 if int(routing_table[node]["hop_count"]) < int(self._routing_table[node]["hop_count"]):
                     self._routing_table[node]["hop_count"] = int(self._routing_table[node]["hop_count"])
                     self._routing_table[node]["next_hop"] = parent_id
@@ -775,15 +833,20 @@ class Node:
                     continue
 
     def _find_node(self, alias: str): # search until hop_count == 1
-        for node, info, in self._routing_table.items():
-            if info["alias"] == alias:
-                node = self._routing_table[node]
-                if node["hop_count"] == 1:
-                    return node
-                else:
-                    node = self._routing_table[node["next_hop"]]
-                    return node
-        print(f"No node found for: {alias}")
+        try:
+            for node, info, in self._routing_table.items():
+                if info["alias"] == alias:
+                    node = self._routing_table[node]
+                    if node["hop_count"] == 1:
+                        return node
+                    else:
+                        node = self._routing_table[node["next_hop"]]
+                        return node
+            print(f"Cannot find node for {alias}. Node has either dropped from the mesh, or your path to it has been"
+                  f" severed.")
+            return None
+        except Exception:
+            return None
 
     def make_file_dir(self):
         path = pathlib.Path("py_netmesh_received_files")
