@@ -8,5 +8,5 @@ agan.pdf
 *.mp4
 *.png
 *.jpg
-/py_netmesh/__pycache__
+__pycache__/
 /py_netmesh_received_files
