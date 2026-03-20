@@ -9,26 +9,24 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 
 class Node:
-    def __init__(self, ip: str, port: int):
+    def __init__(self, ip: str, port: int, test_mode: bool):
+        self.test_mode = test_mode
         self.ip = ip
         self.port = port
         self.node_id = uuid.uuid4()
         self.alias = None
         self.listen_thread = None
         self.discovery_thread = None
-        self.process_thread = None
         self.file_dir = None # directory incoming files will be stored at
         self.stop_event = threading.Event()
         self.allowed_neighbors = []
         self.neighbor_nodes = []
         self._taken_aliases = []
-        self._routing_table = {} #internal use routing table
+        self._routing_table = {} # internal use routing table
         self.routes_to_send = {}
         self.sending_engine_registry = {} # registry for file sending engines
         self.file_reception_registry = {} # how we track received keys, seq, etc for file assembly
-        self._thread_registry = {} # registry for threads of file sending operations, health checks etc
         self._private_key_obj = None
-        self._public_key_obj = None
         self.packet_queue = queue.Queue()
         self.message_json = {
             "type": "PROBE",
@@ -44,7 +42,7 @@ class Node:
             "routing_table": self.routes_to_send,
         }
 
-    def start(self): # TODO: How to handle duplicate aliases?
+    def start(self):
         alias = input("Enter an alias for your node: ").strip()
         self.alias = alias
         self.message_json["alias"] = self.alias
@@ -74,18 +72,21 @@ class Node:
 
     def listener_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4194304) # increase size of OS recv queue-prevent PL.
+        sock.settimeout(1)
         sock.bind(("", self.port))
-        print("Listening thread now active...")
-        while True:
+        while not self.stop_event.is_set():
             data, addr = sock.recvfrom(16000)
             try:
                 message = json.loads(data.decode('utf-8'))
                 message["ip"] = addr[0]
-                if message["alias"] == self.alias:
+                if message["node_id"] == str(self.node_id):
                     continue
                 else:
                     self.packet_queue.put(message)
+            except socket.timeout:
+                continue
             except Exception as e:
                 print(f"listener error: {e}, moving to next packet.")
                 continue
@@ -102,29 +103,33 @@ class Node:
                     del self.routes_to_send[node_id]
             time.sleep(5)
 
-    def discovery_loop(self): # TODO: Figure out final config for this
-        # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        # print("Discovery thread now active...")
-        # while True:
-        #     sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('<broadcast>', self.port))
-        #     time.sleep(5)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # For virtual testing
-        while not self.stop_event.is_set():
-            for neighbor_port in self.allowed_neighbors:
-                sock.sendto(json.dumps(self.message_json).encode('utf-8'),
-                            ('127.0.0.1', neighbor_port))
-            time.sleep(5)
+    def discovery_loop(self):
+        if self.test_mode:
+            print("Launching in TEST MODE, using loopback address...")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            while not self.stop_event.is_set():
+                for neighbor_port in self.allowed_neighbors:
+                    sock.sendto(json.dumps(self.message_json).encode('utf-8'),
+                                ('127.0.0.1', neighbor_port))
+                time.sleep(5)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            while not self.stop_event.is_set():
+                sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('255.255.255.255', self.port))
+                time.sleep(5)
 
     def processor(self):
-        print("Processor thread now active...")
-        while True:
-            message = self.packet_queue.get()
+        while not self.stop_event.is_set():
+            try:
+                message = self.packet_queue.get(timeout=1)
+            except queue.Empty:
+                continue
             try:
                 if message["origin"] == "py_netmesh":
                     if message["type"] is not None:
                         match message["type"]:
-                            case "PROBE": # keep own probe check outside func, don't need to process own probes
+                            case "PROBE":
                                 if str(message['node_id']) == str(self.node_id):
                                     continue
                                 elif message["port"] not in self.allowed_neighbors:
@@ -145,7 +150,7 @@ class Node:
                     print("'origin' key is designates this message is foreign. Ignoring...\n")
             except KeyError as e:
                 if e == "origin":
-                    continue # packet not of our mesh, move to next packet
+                    continue
                 else:
                     print("KeyError: ", e)
                     traceback.print_exc()
@@ -231,14 +236,13 @@ class Node:
                 self._sign(message)
 
                 self._forward_message(next_node=next_node, message=message)
-
         else:
             if recipient_alias == self.alias:
                 print(f"{recipient_alias} is your own alias. Try another.")
             else:
                 print(f"Could not send message, node {recipient_alias} not in routing table.")
 
-    def send_file(self, recipient_alias: str, file_path: pathlib.Path): # TODO: Switch from JSON.dumps to struct.pack
+    def send_file(self, recipient_alias: str, file_path: pathlib.Path):
         recipient_dict = {}
         node_key = ""
 
@@ -281,12 +285,10 @@ class Node:
                 "signature": None
             }
 
-            thread = engine.start(id=file_id ,filepath=file_path, message_data=message)
-            self._thread_registry[file_id] = thread
+            engine.start(id=file_id ,filepath=file_path, message_data=message)
         else:
             print(f"Cannot send file, alias {recipient_alias} not in routing table.")
 
-# TODO: CLEAN UP
     def user_interface(self):
         print(f"NODE STARTING WITH FOLLOWING INFO, IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, "
               f"ID: {self.node_id}\n")
@@ -358,7 +360,6 @@ class Node:
             key_size=2048,
         )
         public_key = self._private_key_obj.public_key()
-        self._public_key_obj = public_key
         public_key_bytes = public_key.public_bytes(encoding=serialization.Encoding.PEM,
                                 format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
@@ -367,20 +368,15 @@ class Node:
         self.message_json["public_key"] = public_key_string
 
     def _encrypt_message(self, payload: dict, public_key):
-        # convert json dict into flat, consistent string
         json_string = json.dumps(payload, sort_keys=True)
-        # convert string into bytes to encrypted
         payload_to_encrypt = json_string.encode('utf-8')
 
-
-        #TODO [DONE] Handle nodes found via Probe routing table; their pub key is store as str not obj
         encrypted_text = public_key.encrypt(payload_to_encrypt,
                                               padding.OAEP(
                                                   mgf=padding.MGF1(algorithm=hashes.SHA256()),
                                                   algorithm=hashes.SHA256(),
                                                   label=None
                                               ))
-        # convert post-encrypt bytes back into string. b64 for safety
         encrypted_string = base64.b64encode(encrypted_text).decode('utf-8')
         return encrypted_string
 
@@ -392,14 +388,24 @@ class Node:
             except Exception as e:
                 print(f"Could not verify or decrypt message from {message["alias"]}. Error {e}")
         elif message["destination_id"] is not None:
-            next_node = self._find_node(alias=message["recipient"])  # ALIAS IS SENDER NOT RECP.
+            next_node = self._find_node(alias=message["recipient"])
             self._forward_message(message=message, next_node=next_node)
             print(f"Message forwarded, alias is {message['recipient']}")
 
     def _handle_probe_packet(self, message: dict):
         time = datetime.datetime.now()
+        if message['alias'] == str(self.alias):
+            print(f"Duplicate alias detected. Updating your alias for uniqueness.")
+            self._update_alias()
         if message['node_id'] in self._routing_table:
+            if message['alias'] != self._routing_table[message['node_id']]['alias']:
+                print(f"NOTICE: Node {self._routing_table[message['node_id']]['alias']} "
+                      f"is changing to alias {message['alias']}.")
+
             self._routing_table[message["node_id"]]["last_seen"] = time
+            self._routing_table[message["node_id"]]["alias"] = message["alias"]
+            self.routes_to_send[message["node_id"]]['alias'] = message['alias']
+
             self._scan_for_routes(routing_table=message["routing_table"],
                                   parent_id=message["node_id"], time=time)
         else:
@@ -532,7 +538,7 @@ class Node:
             next_node = self._find_node(alias=message["recipient"])
             self._forward_message(next_node=next_node, message=message)
 
-    def _handle_ack_message(self, message: dict): # TODO: What do if SEQ mismatch?
+    def _handle_ack_message(self, message: dict):
         if str(message["destination_id"]) == str(self.node_id):
 
             nonce = message["nonce"]
@@ -569,16 +575,16 @@ class Node:
             self._forward_message(message=message, next_node=next_node)
 
     def _handle_death_packet(self, message: dict):
-        if message["id"] == str(self.node_id):
+        if message["node_id"] == str(self.node_id):
             pass
         else:
-            if message["id"] in self._routing_table.keys() and message["id"] in self.routes_to_send.keys():
+            if message["node_id"] in self._routing_table.keys() and message["node_id"] in self.routes_to_send.keys():
 
                 print(f"NODE DEATH DETECTED: {message['alias']} has left the mesh.")
                 print("Other nodes may now be unreachable.")
 
-                del self._routing_table[message["id"]]
-                del self.routes_to_send[message["id"]]
+                del self._routing_table[message["node_id"]]
+                del self.routes_to_send[message["node_id"]]
 
                 json_string = json.dumps(message, sort_keys=True).encode("utf-8")
 
@@ -592,6 +598,7 @@ class Node:
                         sock.sendto(json_string, (neighbor["ip"], neighbor["port"]))
                     except TypeError:
                         pass
+                sock.close()
             else:
                 pass
 
@@ -599,7 +606,7 @@ class Node:
         message = {
             "type": "DEATH",
             "origin": "py_netmesh",
-            "id": str(self.node_id),
+            "node_id": str(self.node_id),
             "alias": self.alias,
         }
 
@@ -613,10 +620,10 @@ class Node:
                 sock.sendto(json_string, (neighbor["ip"], neighbor["port"]))
             except TypeError:
                 pass
+        sock.close()
 
     def _send_ack(self, message: dict, file_id: str, final: bool, status: str, seq: int, key):
-
-        bytenonce = os.urandom(12) # urandom generates bytes, so we must make safe str
+        bytenonce = os.urandom(12)
         nonce = base64.b64encode(bytenonce).decode("utf-8")
 
         ack_message = {
@@ -678,12 +685,9 @@ class Node:
             sender_public_key = sender_info["public_key"]
             sender_public_key = self._serialize_pk(sender_public_key)
 
-            # convert string back to bytes, remove b64 encoding
-            # CHAT specific message signing verification
             if message["type"] == "CHAT":
                 signature_bytes = base64.b64decode(message["signature"].encode('utf-8'))
 
-                # stringify payload dict for verification
                 data_to_verify = json.dumps(message["payload"], sort_keys=True).encode('utf-8')
 
                 sender_public_key.verify(
@@ -698,7 +702,6 @@ class Node:
 
             encrypted_payload_string = message["payload"]
 
-            # again, convert back into bytes and remove b64 encoding
             encrypted_payload_bytes = base64.b64decode(encrypted_payload_string.encode('utf-8'))
 
             plaintext_bytes = self._private_key_obj.decrypt(
@@ -710,7 +713,6 @@ class Node:
                 )
             )
 
-            # return decrypted bytes to string for final decoded message
             plaintext_string = plaintext_bytes.decode('utf-8')
             original_payload_dict = json.loads(
                 plaintext_string)
@@ -745,7 +747,7 @@ class Node:
                 plaintext_json = json.loads(plaintext_data)
                 return plaintext_json
             except InvalidTag:
-                print("Could not decryptJJJJ", InvalidTag)
+                print("Could not decrypt", InvalidTag)
                 traceback.print_exc()
                 continue
             except Exception as e:
@@ -780,16 +782,14 @@ class Node:
 
     def _sign(self, message: dict):
         payload = message["payload"]
-        json_string = json.dumps(payload, sort_keys=True)  # convert json to string
-        data_to_sign = json_string.encode('utf-8')  # serialize string into bytes for encryption
+        json_string = json.dumps(payload, sort_keys=True)
+        data_to_sign = json_string.encode('utf-8')
 
-        # in its byte form, we create our salted signature
         signature = self._private_key_obj.sign(data_to_sign, padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
             salt_length=padding.PSS.MAX_LENGTH
         ), hashes.SHA256())
 
-        # decode utf-8 = convert from bytes back into string. base64 ensures all bytes are converted into safe chars
         string_signature = base64.b64encode(signature).decode('utf8')
         message["signature"] = string_signature
 
@@ -847,6 +847,14 @@ class Node:
             return None
         except Exception:
             return None
+
+    def _update_alias(self):
+        nums = str(self.node_id)[:3]
+        old = self.alias
+        new_alias = self.alias + nums
+        self.alias = new_alias
+        print(f"Alias {old} updated to {new_alias}.")
+        self.message_json['alias'] = new_alias
 
     def make_file_dir(self):
         path = pathlib.Path("py_netmesh_received_files")
@@ -922,7 +930,7 @@ class Engine:
                     self.chunk_queue.put(encrypted_chunk_data)
 
                     if self.seq > 1:
-                        if (self.seq - 1) % self.window_size == 0: # check if hit window size, THEN wait for ack
+                        if (self.seq - 1) % self.window_size == 0:
                             if not self.ack_received.wait(timeout=2.0):
                                 print(f"Timed out waiting for ACK for chunk {self.seq - 1}")
                                 print(f"Resending chunks {self.current_window.keys()}...")
@@ -961,8 +969,6 @@ class Engine:
                 yield chunk
 
     def send_chunk(self, next_hop, sock):
-        # here we will pull from a queue, loaded in after the encrypt function below. Use Event() to send chunks relevant
-        # to ACK responses.
         chunk_data = self.chunk_queue.get()
         json_string = json.dumps(chunk_data, sort_keys=True)
         json_bytes = json_string.encode('utf-8')
@@ -987,19 +993,20 @@ class Engine:
             print(f"ERROR: ACK seq {ack_seq} not in current window {list(self.current_window.keys())}")
 
     def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
-        # we use HYBRID enc here, because RSA enc has size limit beneath our 1mb threshold.
-        # we will first enc the chunks with AES Symm key, and then enc the AES key with our Assym RSA key, like w/ strings
-        # send enc symm key to recipient, which they will open with their private key
         payload = message_data["payload"]
         payload["data"] = base64.b64encode(chunk).decode('utf-8')
         payload_bytes = json.dumps(payload).encode('utf-8')
+
         nonce = os.urandom(12)
         message_data["nonce"] = base64.b64encode(nonce).decode('utf-8')
+
         file_id = uuid.UUID(self.file_uuid).bytes
         aad = struct.pack('!16sI', file_id, self.seq)
+
         encrypted_payload = aesgcm.encrypt(data=payload_bytes, nonce=nonce, associated_data=aad)
         encrypted_payload = base64.b64encode(encrypted_payload).decode('utf-8')
         message_data["payload"] = encrypted_payload
+
         return message_data
 
     def find_next_hop(self):
