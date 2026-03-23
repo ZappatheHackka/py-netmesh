@@ -28,7 +28,7 @@ class Node:
         self.discovery_thread = None
         self.file_dir = None
         self.stop_event = threading.Event()
-        self.allowed_neighbors = []
+        self.allowed_neighbors = [self.port]
         self.neighbor_nodes = []
         self._taken_aliases = []
         self._routing_table = {}
