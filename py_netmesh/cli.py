@@ -8,7 +8,7 @@ def main():
 
     start_parser = subparsers.add_parser("start", help="start py_netmesh")
     start_parser.add_argument("--port", type=int, default=50000, help="port")
-    start_parser.add_argument("--ip", type=str, default="127.0.0.1", help="ip address")
+    start_parser.add_argument("--ip", type=str, default="0.0.0.0", help="ip address")
     start_parser.add_argument("--test", default=False, action="store_true",
                               help="runs on localhost for testing")
 

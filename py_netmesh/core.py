@@ -127,7 +127,7 @@ class Node:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             while not self.stop_event.is_set():
-                sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('192.168.1.255', self.port))
+                sock.sendto(json.dumps(self.message_json).encode('utf-8'), ('255.255.255.255', self.port))
                 time.sleep(5)
 
     def processor(self):
