@@ -86,7 +86,7 @@ class Node:
         sock.bind(("", self.port))
         while not self.stop_event.is_set():
             try:
-                data, addr = sock.recvfrom(16000)
+                data, addr = sock.recvfrom(24000)
             except socket.timeout:
                 continue
             try:
@@ -459,10 +459,10 @@ class Node:
 
                 if seq > 1:
                     if seq <= self.file_reception_registry[file_id]["seq"]:
-                        if self.test_mode:
-                            print(f"{YELLOW}Lagging seq incoming. We have "
-                                  f"{self.file_reception_registry[file_id]['seq']}, incoming "
-                                  f"is {seq}. Likely resent packets. Resending ACK...{RESET}")
+                        # if self.test_mode:
+                        print(f"{YELLOW}Lagging seq incoming. We have "
+                              f"{self.file_reception_registry[file_id]['seq']}, incoming "
+                              f"is {seq}. Likely resent packets. Resending ACK...{RESET}")
                         self._send_ack(message=self.file_reception_registry[file_id]["prev_chunk"],
                                        seq=self.file_reception_registry[file_id]["accepted_seq"],
                                        file_id=file_id, final=False, status="ok", key=aes_key)
@@ -475,9 +475,9 @@ class Node:
                         return
                     else:
                         self.file_reception_registry[file_id]["seq"] = seq
-                        if self.test_mode:
-                            print(f"{YELLOW}PACKET SEQ: {seq}, STORED SEQ: "
-                                  f"{self.file_reception_registry[file_id]['seq']}{RESET}")
+                        # if self.test_mode:
+                        print(f"{YELLOW}PACKET SEQ: {seq}, STORED SEQ: "
+                              f"{self.file_reception_registry[file_id]['seq']}{RESET}")
                         self.file_reception_registry[file_id]["accepted_seq"] = seq
 
                 plaintext_json = self._decrypt_chunk(key=self.file_reception_registry[file_id]["session_key"],
@@ -859,7 +859,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 8192
+        chunk_size = 16384
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
@@ -893,8 +893,8 @@ class Engine:
                     if self.stop_sending.is_set():
                         break
                     data_to_send = deepcopy(message_data)
-                    if self.test_mode:
-                        print(f"{YELLOW}seq {self.seq}, chunk num {self.chunk_num}{RESET}")
+                    # if self.test_mode:
+                    print(f"{YELLOW}seq {self.seq}, chunk num {self.chunk_num}{RESET}")
                     data_to_send["session_key"] = session_key
                     data_to_send["seq"] = self.seq
                     if data_to_send["seq"] == self.chunk_num:
@@ -961,9 +961,9 @@ class Engine:
         if ack_seq in self.current_window:
             self.ack_received.set()
         else:
-            if self.test_mode:
-                print(f"{RED}ERROR: ACK seq {ack_seq} not in current window "
-                      f"{list(self.current_window.keys())}{RESET}")
+            # if self.test_mode:
+            print(f"{RED}ERROR: ACK seq {ack_seq} not in current window "
+                  f"{list(self.current_window.keys())}{RESET}")
 
     def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
         payload = message_data["payload"]
@@ -996,8 +996,9 @@ class Engine:
     def _calc_window_size(self, hop_count: int) -> int:
         if hop_count >= 3:
             window_size = hop_count * 4
-            if window_size > 28:
-                window_size = 28
+            if window_size < 28:
+                window_size = 45
+                return window_size
         else:
             window_size = hop_count * 8
         return window_size + 2
