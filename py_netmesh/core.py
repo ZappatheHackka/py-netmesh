@@ -906,12 +906,11 @@ class Engine:
 
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
-                            if not self.ack_received.wait(timeout=4.0):
+                            if not self.ack_received.wait(timeout=5.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
                                 self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
-                                time.sleep(0.01)
                                 if not self.ack_received.wait(timeout=5.0):
                                     print(f"{RED}{BOLD}Window resend failed. Canceling file transfer.{RESET}")
                                     self.stop_sending.set()
@@ -921,11 +920,11 @@ class Engine:
                                 self.current_window = {}
 
                     self.send_chunk(next_hop=next_hop, sock=sock)
+
                     if data_to_send["final"] is True:
                         print(f"{GREEN}{BOLD}Final chunk sent, halting engine...{RESET}")
                         self.stop_sending.set()
                         break
-
                     if self.seq == 1:
                         del message_data["session_key"]
                         del message_data["window_size"]
