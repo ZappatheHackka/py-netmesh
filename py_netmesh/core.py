@@ -549,9 +549,7 @@ class Node:
             engine = self.sending_engine_registry[file_id]
 
             if decrypted_payload["status"] == "seq_mismatch":
-                print(f"{RED}{BOLD}MISMATCHING SEQ DETECTED! FILE TRANSFER TO "
-                      f"{message['alias']} CANCELLED.{RESET}")
-                engine.stop_sending.set()
+                print(f"{RED}{BOLD}MISMATCHING SEQ DETECTED!")
                 return
             else:
                 ack_seq = decrypted_payload["seq"]
