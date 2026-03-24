@@ -906,7 +906,7 @@ class Engine:
 
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
-                            if not self.ack_received.wait(timeout=3.5):
+                            if not self.ack_received.wait(timeout=6):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
                                 self.ack_received.clear()
