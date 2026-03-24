@@ -468,12 +468,11 @@ class Node:
                                        file_id=file_id, final=False, status="ok", key=aes_key)
                         return
                     elif seq != (self.file_reception_registry[file_id]["seq"] + 1):
-                        # print(f"{RED}{BOLD}WARNING, incoming chunk is seq {seq}, while we are expecting "
-                        #       f"{(self.file_reception_registry[file_id]['seq'] + 1)}.\nFile may be corrupted.{RESET}")
-                        # self._send_ack(message=message, file_id=file_id, status="seq_mismatch", final=False,
-                        #                key=aes_key, seq=seq)
-                        # return
-                        pass
+                        print(f"{RED}{BOLD}WARNING, incoming chunk is seq {seq}, while we are expecting "
+                              f"{(self.file_reception_registry[file_id]['seq'] + 1)}.\nFile may be corrupted.{RESET}")
+                        self._send_ack(message=message, file_id=file_id, status="seq_mismatch", final=False,
+                                       key=aes_key, seq=seq)
+                        return
                     else:
                         self.file_reception_registry[file_id]["seq"] = seq
                         # if self.test_mode:
