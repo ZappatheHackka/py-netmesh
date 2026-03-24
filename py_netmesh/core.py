@@ -905,7 +905,7 @@ class Engine:
                     self.chunk_queue.put(encrypted_chunk_data)
 
                     if self.seq > 1:
-                        if self.seq % self.window_size == 0:
+                        if (self.seq - 1) % self.window_size == 0:
                             if not self.ack_received.wait(timeout=3.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
