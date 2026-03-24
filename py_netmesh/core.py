@@ -6,10 +6,11 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from prompt_toolkit import PromptSession
+from art import art
 
 RED = "\033[31m"
 GREEN = "\033[32m"
-YELLOW = "\033[95m"
+PURPLE = "\033[95m"
 CYAN = "\033[36m"
 WHITE = "\033[37m"
 DIM = "\033[90m"
@@ -18,8 +19,9 @@ UNDERLINE = "\033[4m"
 RESET = "\033[0m"
 
 class Node:
-    def __init__(self, ip: str, port: int, test_mode: bool):
+    def __init__(self, ip: str, port: int, test_mode: bool, lan: bool):
         self.test_mode = test_mode
+        self.lan_mode = lan
         self.ip = ip
         self.port = port
         self.node_id = uuid.uuid4()
@@ -108,15 +110,16 @@ class Node:
             stale = [node_id for node_id, info in self._routing_table.items()
                      if info.get("last_seen") and (now - info["last_seen"]).seconds > 10]
             for node_id in stale:
-                print(f"{YELLOW}Can no longer reach Node {self._routing_table[node_id]['alias']}.{RESET}")
+                print(f"{PURPLE}Can no longer reach node {self._routing_table[node_id]['alias']}.{RESET}")
                 del self._routing_table[node_id]
                 if node_id in self.routes_to_send:
                     del self.routes_to_send[node_id]
             time.sleep(5)
 
     def discovery_loop(self):
-        if self.test_mode:
-            print(f"{WHITE}{UNDERLINE}Launching in TEST MODE, using loopback address...{RESET}\n")
+        if self.test_mode or not self.lan_mode:
+            if self.test_mode:
+                print(f"{WHITE}{UNDERLINE}Launching in TEST MODE for additional print statements...{RESET}\n")
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             while not self.stop_event.is_set():
                 for neighbor_port in self.allowed_neighbors:
@@ -158,7 +161,7 @@ class Node:
                     else:
                         print(f"{RED}{BOLD}Processor detected py_netmesh packet 'type' key had value of Nonetype. DEBUG!!{RESET}")
                 else:
-                    print(f"{YELLOW}'origin' key designates this message as foreign. Ignoring...{RESET}\n")
+                    print(f"{PURPLE}'origin' key designates this message as foreign. Ignoring...{RESET}\n")
             except KeyError as e:
                 if e == "origin":
                     continue
@@ -167,13 +170,13 @@ class Node:
                     traceback.print_exc()
 
     def stop(self):
-        print(f"{WHITE}{UNDERLINE}Stopping node...{RESET}")
+        print(f"{WHITE}{BOLD}Stopping node...{RESET}")
         self._announce_death()
         self.stop_event.set()
         self.listen_thread.join()
         self.discovery_thread.join()
         self.processor_thread.join()
-        print(f"{WHITE}{UNDERLINE}Node stopped cleanly.{RESET}")
+        print(f"{WHITE}{BOLD}Node stopped cleanly.{RESET}")
 
     def send_message(self, recipient_alias: str, message: str):
         recipient_dict = {}
@@ -263,6 +266,8 @@ class Node:
             engine.recipient_id = node_key
             if self.test_mode:
                 engine.test_mode = True
+            if self.lan_mode:
+                engine.lan_mode = True
             self.sending_engine_registry[file_id] = engine
 
             message = {
@@ -293,56 +298,70 @@ class Node:
             print(f"{RED}{BOLD}Cannot send file, alias {recipient_alias} not in routing table.{RESET}")
 
     def user_interface(self):
-        print(f"{WHITE}{BOLD}{UNDERLINE}NODE STARTING WITH FOLLOWING INFO, "
+        print(art)
+        print(f"{WHITE}{BOLD}NODE STARTING WITH FOLLOWING INFO, "
               f"IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, ID: {self.node_id}\n{RESET}")
         print(f"{WHITE}{BOLD}Type /list to see nodes, /msg <alias> <text> to chat, /allow <port> to "
               f"update list of allowed neighbors, /send_file <alias> <filepath> to send files, \n"
               f"/change_filedir <filepath> to change where incoming files are received, "
               f"and /quit to exit\n{RESET}")
-        print(f"{YELLOW}Your current directory is {pathlib.Path.cwd()}{RESET}")
+        print(f"{GREEN}Your current directory is {pathlib.Path.cwd()}{RESET}")
         p = PromptSession()
         while True:
             cmd = p.prompt("> ").strip()
             cmd = cmd.split()
-            if len(cmd) == 1:
-                cmd = "".join(cmd)
-                match cmd:
-                    case "/list":
-                        for info in self._routing_table.values():
-                            print(f"{GREEN}●{RESET} {YELLOW}{info['alias']}{RESET} {DIM}{info['hop_count']} hop(s)  {info['ip']}{RESET}")
-                    case "/quit":
-                        print(f"{YELLOW}{BOLD}Quitting...{RESET}")
-                        self.stop()
-                        exit()
-            elif len(cmd) >= 2:
-                match cmd[0]:
-                    case "/msg":
-                        try:
-                            print(f"{YELLOW}{BOLD}Attempting to send message...{RESET}")
-                            self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
-                        except Exception as e:
-                            print(f"{RED}{BOLD}Failed to send message. Error: {e}{RESET}")
-                            traceback.print_exc()
-                    case "/allow":
-                        neighbors = cmd[1:]
-                        self.allow_neighbors(neighbors)
-                        print(f"{YELLOW}{BOLD}Updated allowed neighbors list: {self.allowed_neighbors}.{RESET}")
-                    case "/change_filedir":
-                        new_path = cmd[1]
-                        path = self.file_dir
-                        self.file_dir = new_path
-                        print(f"{YELLOW}{BOLD}You will now receive files at {new_path} instead of {path}.{RESET}")
-                    case "/send_file":
-                        recipient = cmd[1]
-                        filepath = cmd[2].strip("'\"")
-                        path = pathlib.Path(filepath).expanduser().resolve()
-                        if not path.exists():
-                            print(f"{RED}{BOLD}{UNDERLINE}File {path} does not exist. Enter a different filepath and try again.{RESET}")
-                        elif not path.is_file():
-                            print(f"{RED}{BOLD}{UNDERLINE}File {path} does not point to a file. Enter a different filepath and try again.{RESET}")
-                        else:
-                            print(f"{YELLOW}Attempting to send file...{RESET}")
-                            self.send_file(recipient_alias=recipient, file_path=path)
+            try:
+                if len(cmd) == 1:
+                    cmd = "".join(cmd)
+                    match cmd:
+                        case "/list":
+                            for info in self._routing_table.values():
+                                print(f"{GREEN}●{RESET} {PURPLE}{info['alias']}{RESET} "
+                                      f"{WHITE}{info['hop_count']} hop(s) from you{RESET}")
+                        case "/quit":
+                            print(f"{PURPLE}{BOLD}Quitting...{RESET}")
+                            self.stop()
+                            exit()
+                        case "/?":
+                            print(f"{WHITE}{BOLD}Type /list to see nodes, /msg <alias> <text> to chat,"
+                                  f" /allow <port> to update list of allowed neighbors, /send_file <alias> <filepath> "
+                                  f"to send files, \n /change_filedir <filepath> to change where incoming "
+                                  f"files are received, and /quit to exit\n{RESET}.")
+                elif len(cmd) >= 2:
+                    match cmd[0]:
+                        case "/msg":
+                            try:
+                                print(f"{PURPLE}{BOLD}Attempting to send message...{RESET}")
+                                self.send_message(recipient_alias=cmd[1], message=" ".join(cmd[2:]))
+                            except Exception as e:
+                                print(f"{RED}{BOLD}Failed to send message. Error: {e}{RESET}")
+                                traceback.print_exc()
+                        case "/allow":
+                            neighbors = cmd[1:]
+                            self.allow_neighbors(neighbors)
+                            print(f"{PURPLE}{BOLD}Updated allowed neighbors list: {self.allowed_neighbors}.{RESET}")
+                        case "/change_filedir":
+                            new_path = pathlib.Path(cmd[1])
+                            new_path.mkdir(parents=True, exist_ok=True)
+                            path = self.file_dir
+                            self.file_dir = new_path
+                            print(f"{PURPLE}{BOLD}You will now receive files at {new_path} instead of "
+                                  f"{path}.{RESET}")
+                        case "/send_file":
+                            recipient = cmd[1]
+                            filepath = cmd[2].strip("'\"")
+                            path = pathlib.Path(filepath).expanduser().resolve()
+                            if not path.exists():
+                                print(f"{RED}{BOLD}{UNDERLINE}File {path} does not exist. Enter a different "
+                                      f"filepath and try again.{RESET}")
+                            elif not path.is_file():
+                                print(f"{RED}{BOLD}{UNDERLINE}File {path} does not point to a file. Enter a "
+                                      f"different filepath and try again.{RESET}")
+                            else:
+                                print(f"{PURPLE}Attempting to send file...{RESET}")
+                                self.send_file(recipient_alias=recipient, file_path=path)
+            except IndexError:
+                    print("Missing command parameter. See command list above or do '/?' for a reminder.")
 
     def allow_neighbors(self, neighbors: list[int]):
         new_neighbors = [int(port) for port in neighbors]
@@ -391,11 +410,11 @@ class Node:
     def _handle_probe_packet(self, message: dict):
         time = datetime.datetime.now()
         if message['alias'] == str(self.alias):
-            print(f"{YELLOW}{BOLD}Duplicate alias detected. Updating your alias for uniqueness.{RESET}")
+            print(f"{PURPLE}{BOLD}Duplicate alias detected. Updating your alias for uniqueness.{RESET}")
             self._update_alias()
         if message['node_id'] in self._routing_table:
             if message['alias'] != self._routing_table[message['node_id']]['alias']:
-                print(f"{YELLOW}{BOLD}NOTICE: Node {self._routing_table[message['node_id']]['alias']} "
+                print(f"{PURPLE}{BOLD}NOTICE: Node {self._routing_table[message['node_id']]['alias']} "
                       f"is changing to alias {message['alias']}.{RESET}")
             self._routing_table[message["node_id"]]["last_seen"] = time
             self._routing_table[message["node_id"]]["alias"] = message["alias"]
@@ -403,7 +422,7 @@ class Node:
             self._scan_for_routes(routing_table=message["routing_table"],
                                   parent_id=message["node_id"], time=time)
         else:
-            print(f"{GREEN}◆ New neighbor node found: {YELLOW}{message['alias']}{RESET}")
+            print(f"{GREEN}◆ New neighbor node found: {PURPLE}{message['alias']}{RESET}")
             public_key = self._deserialize_pk(message['public_key'])
             serialized_pub_key = public_key.public_bytes(encoding=serialization.Encoding.PEM,
                                                          format=serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -436,6 +455,7 @@ class Node:
                 file_id = message["file_id"]
                 alias = message["alias"]
                 if seq == 1:
+                    print(f"{WHITE}{BOLD}Incoming file transfer from {alias}!{RESET}")
                     session_key = message["session_key"]
                     window_size = message["window_size"]
                     key_bytes = base64.b64decode(session_key.encode('utf-8'))
@@ -459,8 +479,8 @@ class Node:
 
                 if seq > 1:
                     if seq <= self.file_reception_registry[file_id]["seq"]:
-                        # if self.test_mode:
-                        print(f"{YELLOW}Lagging seq incoming. We have "
+                        if self.test_mode:
+                            print(f"{PURPLE}Lagging seq incoming. We have "
                               f"{self.file_reception_registry[file_id]['seq']}, incoming "
                               f"is {seq}. Likely resent packets. Resending ACK...{RESET}")
                         self._send_ack(message=self.file_reception_registry[file_id]["prev_chunk"],
@@ -475,8 +495,8 @@ class Node:
                         return
                     else:
                         self.file_reception_registry[file_id]["seq"] = seq
-                        # if self.test_mode:
-                        print(f"{YELLOW}PACKET SEQ: {seq}, STORED SEQ: "
+                        if self.test_mode:
+                            print(f"{PURPLE}PACKET SEQ: {seq}, STORED SEQ: "
                               f"{self.file_reception_registry[file_id]['seq']}{RESET}")
                         self.file_reception_registry[file_id]["accepted_seq"] = seq
 
@@ -517,8 +537,8 @@ class Node:
                 if message["final"] == True:
                     self._send_ack(message=message, file_id=file_id, final=True,
                                    status="ok", key=aes_key, seq=seq)
-                    print(f"{GREEN}{BOLD}✓ FILE RECEIVED: {filename} at "
-                          f"{self.file_dir}/{filename} from {YELLOW}{message['alias']}{RESET}")
+                    print(f"{GREEN}{BOLD} FILE RECEIVED: {filename} at "
+                          f"{self.file_dir}/{filename} from {PURPLE}{message['alias']}{RESET}")
                     file_handle.write(b"".join(self.file_reception_registry[file_id]["chunks"]))
                     file_handle.flush()
                     file_handle.close()
@@ -544,7 +564,7 @@ class Node:
 
             decrypted_payload = self._decrypt_ack(our_engines=our_engines, message=message)
             if self.test_mode:
-                print(f"{YELLOW}ACK received with seq {decrypted_payload['seq']}{RESET}")
+                print(f"{PURPLE}ACK received with seq {decrypted_payload['seq']}{RESET}")
             file_id = str(decrypted_payload["file_id"])
             engine = self.sending_engine_registry[file_id]
 
@@ -560,7 +580,7 @@ class Node:
                 if decrypted_payload["final"] == True:
                     print(f"{GREEN}{BOLD}✓ FILE SUCCESSFULLY SENT: {decrypted_payload['filename']}.{RESET}\n")
                     if self.test_mode:
-                        print(f"{YELLOW}FINAL ACK RECEIVED, DESTROYING ENGINE FOR FILE "
+                        print(f"{PURPLE}FINAL ACK RECEIVED, DESTROYING ENGINE FOR FILE "
                               f"{decrypted_payload['filename']}{RESET}")
                     engine.stop_sending.set()
                     engine = None
@@ -576,7 +596,7 @@ class Node:
         else:
             if message["node_id"] in self._routing_table.keys() and message["node_id"] in self.routes_to_send.keys():
                 print(f"{RED}{BOLD}NODE DEATH: {message['alias']} has left the mesh.{RESET}")
-                print(f"{YELLOW}Other nodes may now be unreachable.{RESET}")
+                print(f"{PURPLE}Other nodes may now be unreachable.{RESET}")
 
                 del self._routing_table[message["node_id"]]
                 del self.routes_to_send[message["node_id"]]
@@ -794,7 +814,7 @@ class Node:
                     "next_hop": parent_id,
                     "public_key": routing_table[node]["public_key"],
                 }
-                print(f"{GREEN}◆ New node found via PROBE: {YELLOW}{self._routing_table[node]['alias']}{RESET}")
+                print(f"{GREEN}◆ New node found via PROBE: {PURPLE}{self._routing_table[node]['alias']}{RESET}")
             else:
                 self._routing_table[node]["last_seen"] = time
                 if int(routing_table[node]["hop_count"]) < int(self._routing_table[node]["hop_count"]):
@@ -832,7 +852,6 @@ class Node:
         self.file_dir = path
         self.file_dir.mkdir(parents=True, exist_ok=True)
 
-
 class Engine:
     def __init__(self):
         self.seq = 1
@@ -848,6 +867,7 @@ class Engine:
         self.recipient_id = None
         self.aes_key = None
         self.test_mode = False
+        self.lan_mode = False
 
     def start(self, id: str, filepath, message_data: dict):
         self.file_uuid = id
@@ -864,12 +884,12 @@ class Engine:
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
         if self.test_mode:
-            print(f"{YELLOW}WINDOW SIZE CALCULATED TO BE {self.window_size}{RESET}")
+            print(f"{PURPLE}WINDOW SIZE CALCULATED TO BE {self.window_size}{RESET}")
 
         message_data["window_size"] = self.window_size
         del message_data["hop_count"]
 
-        print(f"{YELLOW}Sending {self.chunk_num} chunks...{RESET}")
+        print(f"{PURPLE}Sending {self.chunk_num} chunks...{RESET}")
         next_hop = self.find_next_hop()
 
         session_key = AESGCM.generate_key(256)
@@ -893,12 +913,13 @@ class Engine:
                     if self.stop_sending.is_set():
                         break
                     data_to_send = deepcopy(message_data)
-                    # if self.test_mode:
-                    print(f"{YELLOW}seq {self.seq}, chunk num {self.chunk_num}{RESET}")
                     data_to_send["session_key"] = session_key
                     data_to_send["seq"] = self.seq
                     if data_to_send["seq"] == self.chunk_num:
                         data_to_send["final"] = True
+
+                    if self.test_mode:
+                        print(f"{PURPLE}seq {self.seq}, chunk num {self.chunk_num}{RESET}")
 
                     encrypted_chunk_data = self.encrypt_chunk(chunk, data_to_send, aesgcm)
                     self.current_window[self.seq] = encrypted_chunk_data
@@ -907,8 +928,8 @@ class Engine:
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
                             if not self.ack_received.wait(timeout=5.0):
-                                print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
-                                print(f"{YELLOW}Resending window...{RESET}")
+                                print(f"{PURPLE}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
+                                print(f"{PURPLE}Resending window...{RESET}")
                                 self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
                                 if not self.ack_received.wait(timeout=5.0):
@@ -920,7 +941,10 @@ class Engine:
                                 self.current_window = {}
 
                     self.send_chunk(next_hop=next_hop, sock=sock)
-                    time.sleep(0.0125)
+                    self._print_progress(filename=message_data["payload"]["filename"], seq=self.seq,
+                                         total=self.chunk_num)
+                    if self.lan_mode:
+                        time.sleep(0.0125)
                     if data_to_send["final"] is True:
                         print(f"{GREEN}{BOLD}Final chunk sent, halting engine...{RESET}")
                         self.stop_sending.set()
@@ -929,6 +953,7 @@ class Engine:
                         del message_data["session_key"]
                         del message_data["window_size"]
                     self.seq += 1
+
             except Exception as e:
                 print(f"{RED}{BOLD}Chunk sending failed, error: {e}{RESET}")
                 traceback.print_exc()
@@ -961,9 +986,9 @@ class Engine:
         if ack_seq in self.current_window:
             self.ack_received.set()
         else:
-            # if self.test_mode:
-            print(f"{RED}ERROR: ACK seq {ack_seq} not in current window "
-                  f"{list(self.current_window.keys())}{RESET}")
+            if self.test_mode:
+                print(f"{RED}ERROR: ACK seq {ack_seq} not in current window "
+                      f"{list(self.current_window.keys())}{RESET}")
 
     def encrypt_chunk(self, chunk, message_data: dict, aesgcm: AESGCM) -> dict:
         payload = message_data["payload"]
@@ -986,7 +1011,7 @@ class Engine:
     def number_of_chunks(self, filepath: str, chunk_size: int) -> int:
         file_size = os.path.getsize(filepath)
         if self.test_mode:
-            print(f"{YELLOW}CHUNK NUM CALC: {file_size} / {chunk_size}{RESET}")
+            print(f"{PURPLE}CHUNK NUM CALC: {file_size} / {chunk_size}{RESET}")
         return math.ceil(file_size / chunk_size)
 
     def _deserialize_pk(self, pk: bytes):
@@ -1001,3 +1026,11 @@ class Engine:
         else:
             window_size = hop_count * 8
         return window_size + 2
+
+    def _print_progress(self, seq, total, filename):
+        pct = int((seq / total) * 100)
+        filled = int(pct / 2)
+        bar = "█" * filled + "░" * (50 - filled)
+        print(f"\r{CYAN}{BOLD}Sending {filename}{RESET} {GREEN}{bar}{RESET} {WHITE}{pct}%{RESET}", end="", flush=True)
+        if seq == total:
+            print()
