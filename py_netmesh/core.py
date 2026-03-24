@@ -859,7 +859,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 11384
+        chunk_size = 9192
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
@@ -905,7 +905,7 @@ class Engine:
                     self.chunk_queue.put(encrypted_chunk_data)
 
                     if self.seq > 1:
-                        if (self.seq - 1) % self.window_size == 0:
+                        if self.seq % self.window_size == 0:
                             if not self.ack_received.wait(timeout=3.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
