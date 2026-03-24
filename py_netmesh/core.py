@@ -920,7 +920,7 @@ class Engine:
                                 self.current_window = {}
 
                     self.send_chunk(next_hop=next_hop, sock=sock)
-
+                    time.sleep(0.0125)
                     if data_to_send["final"] is True:
                         print(f"{GREEN}{BOLD}Final chunk sent, halting engine...{RESET}")
                         self.stop_sending.set()
