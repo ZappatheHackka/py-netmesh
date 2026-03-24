@@ -859,7 +859,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 16384
+        chunk_size = 11384
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
@@ -906,11 +906,12 @@ class Engine:
 
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
-                            if not self.ack_received.wait(timeout=2.0):
+                            if not self.ack_received.wait(timeout=3.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
                                 self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
+                                time.sleep(0.01)
                                 if not self.ack_received.wait(timeout=5.0):
                                     print(f"{RED}{BOLD}Window resend failed. Canceling file transfer.{RESET}")
                                     self.stop_sending.set()
@@ -997,7 +998,7 @@ class Engine:
         if hop_count >= 3:
             window_size = hop_count * 4
             if window_size < 28:
-                window_size = 45
+                window_size = 28
                 return window_size
         else:
             window_size = hop_count * 8
