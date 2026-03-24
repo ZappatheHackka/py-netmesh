@@ -86,7 +86,7 @@ class Node:
         sock.bind(("", self.port))
         while not self.stop_event.is_set():
             try:
-                data, addr = sock.recvfrom(24000)
+                data, addr = sock.recvfrom(16000)
             except socket.timeout:
                 continue
             try:
@@ -859,7 +859,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 9192
+        chunk_size = 8192
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
@@ -906,7 +906,7 @@ class Engine:
 
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
-                            if not self.ack_received.wait(timeout=3.0):
+                            if not self.ack_received.wait(timeout=4.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
                                 self.ack_received.clear()
@@ -997,9 +997,8 @@ class Engine:
     def _calc_window_size(self, hop_count: int) -> int:
         if hop_count >= 3:
             window_size = hop_count * 4
-            if window_size < 28:
+            if window_size > 28:
                 window_size = 28
-                return window_size
         else:
             window_size = hop_count * 8
         return window_size + 2
