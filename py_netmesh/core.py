@@ -86,7 +86,7 @@ class Node:
         sock.bind(("", self.port))
         while not self.stop_event.is_set():
             try:
-                data, addr = sock.recvfrom(16000)
+                data, addr = sock.recvfrom(24000)
             except socket.timeout:
                 continue
             try:
@@ -549,7 +549,9 @@ class Node:
             engine = self.sending_engine_registry[file_id]
 
             if decrypted_payload["status"] == "seq_mismatch":
-                print(f"{RED}{BOLD}MISMATCHING SEQ DETECTED!")
+                print(f"{RED}{BOLD}MISMATCHING SEQ DETECTED! FILE TRANSFER TO "
+                      f"{message['alias']} CANCELLED.{RESET}")
+                engine.stop_sending.set()
                 return
             else:
                 ack_seq = decrypted_payload["seq"]
@@ -857,7 +859,7 @@ class Engine:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.file_uuid = message_data["file_id"]
 
-        chunk_size = 8192
+        chunk_size = 9192
         self.chunk_num = self.number_of_chunks(filepath=filepath, chunk_size=chunk_size)
 
         self.window_size = self._calc_window_size(hop_count=message_data["hop_count"])
@@ -904,11 +906,12 @@ class Engine:
 
                     if self.seq > 1:
                         if (self.seq - 1) % self.window_size == 0:
-                            if not self.ack_received.wait(timeout=6):
+                            if not self.ack_received.wait(timeout=3.0):
                                 print(f"{YELLOW}{BOLD}Timed out waiting for ACK for chunk {self.seq - 1}{RESET}")
                                 print(f"{YELLOW}Resending window...{RESET}")
                                 self.ack_received.clear()
                                 self._resend_chunks(next_hop=next_hop, sock=sock, final=data_to_send["final"])
+                                time.sleep(0.01)
                                 if not self.ack_received.wait(timeout=5.0):
                                     print(f"{RED}{BOLD}Window resend failed. Canceling file transfer.{RESET}")
                                     self.stop_sending.set()
@@ -996,6 +999,7 @@ class Engine:
             window_size = hop_count * 4
             if window_size < 28:
                 window_size = 28
+                return window_size
         else:
             window_size = hop_count * 8
         return window_size + 2
