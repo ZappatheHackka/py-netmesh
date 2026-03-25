@@ -18,7 +18,7 @@ This project was built as an exercise in exploring mesh networking, cryptography
 - **Distance vector routing** -- nodes maintain and propagate routing tables, dynamically finding the shortest paths through the mesh
 - **Hybrid RSA/AES encryption** -- RSA for key exchange and simple chat messages, hybrid RSA/AES-GCM for file payload encryption
 - **PSS signature verification** on chat messages
-- **Batch UDP file transfer** with acknowledgment, retransmit logic, and kernel-level buffer optimization
+- **Windowed UDP file transfer** with acknowledgment, retransmit logic, and kernel-level buffer optimization
 - **Node dropout detection** via health checks and death packet propagation
 - **Duplicate alias handling** -- conflicts detected and resolved automatically
 - **LAN broadcast mode**, **localhost mode**, and a **debug mode** that offers more feedback on certain operations
@@ -42,7 +42,7 @@ The UDP decision, however, is not without its downsides. File transfers run perf
 File transfers use RSA/AES Hybrid encryption rather than pure RSA. This was due to RSA's size constraints, which even the conservative 8kb chunk size exceeds. A hybrid RSA/AES design was therefore necessary, where the AES key is sent encrypted with RSA, and used on all subsequent chunk payloads.
 
 ### File Transfers
-File transfers, like everything else, use UDP. This was done because A: it is consistent with the above outlined architecture, and B: I wanted to explore building a custom file transfer protocol. File transfers use a custom batch processing system, where chunks per window are dynamically calculated based on receiving node's distance. This system has its limitations, such as a lack of retry mechanism and transfers being outright cancelled upon seq mismatch. More on limitations detailed below.
+File transfers, like everything else, use UDP. This was done because A: it is consistent with the above outlined architecture, and B: I wanted to explore building a custom file transfer protocol. File transfers use a custom window protocol, where chunks per window are dynamically calculated based on receiving node's distance. This system has its limitations, such as a lack of retry mechanism and transfers being outright cancelled upon seq mismatch. More on limitations detailed below.
 
 ### Death Packets
 Death packets that announce a node's absence were deemed necessary after realizing the shortcomings of periodic healthchecks. Given the linear topology of the network and nodes sharing each other's routing tables, dead nodes would not naturally decay in other nodes' routing tables beyond a certain point. Picture a network of nodes A, B, C, and D. For instance, if Node A drops out, Node B, its neighbor, would soon realize and update its routing table. However, if we have a Node C, that gets updates from both B and D, Node C's "last_seen" would continually be updated by Node D, which is in turn being updated by Node C. So the two would essentially tell each other that Node A lives, all the while Node B fails to share news of the decay. A network-wide death announcement fixes this circular logic and allows all nodes to keep an up to date routing table.
@@ -62,7 +62,7 @@ py-netmesh utilizes both RSA and AES encryption to keep data secure. Chat messag
 For file transfers, a random AES-256 session key is generated per file transfer and encrypted with the recipient's RSA public key using OAEP padding. All payload data is then encrypted with AES-GCM using the session key, with AAD binding each chunk to its sequence number and file ID for integrity.
 
 ### File Transfer
-Files are split into 8KB chunks and sent using a batch processing protocol. The sender waits for an ACK after each window before advancing. On timeout, the window is resent. Sequence numbers are tracked on both sides to detect and handle out-of-order or duplicate delivery.
+Files are split into 8KB chunks and sent using a windowed processing protocol. The sender waits for an ACK after each window before advancing. On timeout, the window is resent. Sequence numbers are tracked on both sides to detect and handle out-of-order or duplicate delivery.
 
 ### Node Dropout
 Nodes announce their departure by broadcasting a DEATH packet to neighbors, which propagates through the mesh. A background health check also removes nodes whose `last_seen` timestamp exceeds a threshold, handling ungraceful exits such as crashes or signal kills.
