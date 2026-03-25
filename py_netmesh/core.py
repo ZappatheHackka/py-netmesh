@@ -118,8 +118,6 @@ class Node:
 
     def discovery_loop(self):
         if self.test_mode or not self.lan_mode:
-            if self.test_mode:
-                print(f"{WHITE}{UNDERLINE}Launching in TEST MODE for additional print statements...{RESET}\n")
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             while not self.stop_event.is_set():
                 for neighbor_port in self.allowed_neighbors:
@@ -299,6 +297,8 @@ class Node:
 
     def user_interface(self):
         print(art)
+        if self.test_mode:
+            print(f"{WHITE}{UNDERLINE}Launching in TEST MODE for additional print statements...{RESET}\n")
         print(f"{WHITE}{BOLD}NODE STARTING WITH FOLLOWING INFO, "
               f"IP: {self.ip}, PORT: {self.port}, ALIAS: {self.alias}, ID: {self.node_id}\n{RESET}")
         print(f"{WHITE}{BOLD}Type /list to see nodes, /msg <alias> <text> to chat, /allow <port> to "
