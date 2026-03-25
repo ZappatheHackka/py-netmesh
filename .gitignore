@@ -3,9 +3,9 @@ env/
 .env
 *.pyc
 m.txt
-agan.pdf
+against.pdf
 *.pdf
-*.mp4
+astro.mp4
 *.png
 *.jpg
 /py_netmesh/__pycache__/
