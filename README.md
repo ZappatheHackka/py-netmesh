@@ -1,6 +1,6 @@
 # py-netmesh
 
-A decentralized, peer-to-peer mesh network with end-to-end encrypted messaging and file transfer. Built entirely from scratch in Python.
+A decentralized, peer-to-peer mesh network with end-to-end encrypted messaging and file transfer. Implemented from scratch in Python.
 
 ---
 
