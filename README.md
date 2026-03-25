@@ -2,8 +2,6 @@
 
 A decentralized, peer-to-peer mesh network with end-to-end encrypted messaging and file transfer. Built entirely from scratch in Python.
 
-## See YouTube Demo:
-[![▶ See Demo](py-netmesh-thumbnail.jpg)](https://www.youtube.com/watch?v=QNNzsFacZYQ)
 ---
 
 ## What is it?
@@ -25,6 +23,11 @@ This project was built as an exercise in exploring mesh networking, cryptography
 - **Duplicate alias handling** -- conflicts detected and resolved automatically
 - **LAN broadcast mode**, **localhost mode**, and a **debug mode** that offers more feedback on certain operations
 - **Multi-hop routing** -- messages and files route through intermediate nodes
+
+---
+
+## See YouTube Demo:
+[![▶ See Demo](py-netmesh-thumbnail.jpg)](https://www.youtube.com/watch?v=QNNzsFacZYQ)
 
 ---
 
