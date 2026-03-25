@@ -2,7 +2,7 @@
 
 A decentralized, peer-to-peer mesh network with end-to-end encrypted messaging and file transfer. Built entirely from scratch in Python.
 
-[▶ See Demo(py-netmesh-thumbnail.jpg)](https://www.youtube.com/watch?v=QNNzsFacZYQ)
+[![▶ See Demo](py-netmesh-thumbnail.jpg)](https://www.youtube.com/watch?v=QNNzsFacZYQ)
 ---
 
 ## What is it?
