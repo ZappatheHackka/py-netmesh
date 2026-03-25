@@ -31,7 +31,8 @@ This project was built as an exercise in exploring mesh networking, cryptography
 ## Design Decisions
 
 ### UDP over TCP
-py-netmesh was conceptualized with anonymity & decentralization at the forefront, which made UDP the natural protocol choice. UDP's connectionless architecture allows a wide network of nodes to have minimal direct connection with each other, all the while propagating each other's existence through PROBE packets and gossip architecture. Nodes can only directly connect to their neighbors, meaning they are more or less reliant on neighborly connections to reach far away nodes. Such is the nature of py-netmesh's decentralized gossip system, in which I chose isolation and decentralization over convenience. 
+py-netmesh was conceptualized with anonymity & decentralization at the forefront, which made UDP the natural protocol choice. UDP's connectionless architecture allows a wide network of nodes to have minimal direct connection with each other, all the while propagating each other's existence through PROBE packets and gossip architecture. Nodes can only directly connect to their neighbors, meaning they are more or less reliant on neighborly connections to reach far away nodes. Such is the nature of py-netmesh's decentralized gossip system, in which I chose isolation and decentralization over convenience.
+
 The UDP decision, however, is not without its downsides. File transfers run perfectly on localhost, but are incredibly inconsistent on WiFi and, when not failing, are markedly slower than their loopback counterpart. Partially responsible for this, I believe, is the sluggishness of my Kindle Fire's processor, which likely struggled under the weight of thousands of cryptographic operations. Some control flow in the form of time.sleep(0.0125) after each chunk seemed to stymie the bleeding, but LAN file transfers remain inconsistent.
 
 ### Hybrid Encryption 
@@ -109,6 +110,9 @@ python cli.py start --port 5001
 ```bash
 python cli.py start --ip 192.168.1.5 --port 5000 --lan
 ```
+
+**Ubuntu bonus**
+Check the simulate nodes folder for scripts to easily launch multiple nodes at once.
 
 ### Commands
 
