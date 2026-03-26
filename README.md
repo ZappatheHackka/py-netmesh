@@ -123,7 +123,7 @@ Once a node is running, the following commands are available:
 
 | Command | Description |
 |---------|-------------|
-| `/list` | List all known nodes in the mesh with hop count and IP |
+| `/list` | List all known nodes in the mesh with hop count and alias |
 | `/msg <alias> <text>` | Send an encrypted message to a node |
 | `/send_file <alias> <filepath>` | Send a file to a node |
 | `/allow <port>` | Add a port to the allowed neighbors list |
