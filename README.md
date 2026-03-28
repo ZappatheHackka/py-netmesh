@@ -17,9 +17,9 @@ This project was built as an exercise in exploring mesh networking, cryptography
 - **Decentralized node discovery** via gossip protocol and UDP broadcast
 - **Distance vector routing** -- nodes maintain and propagate routing tables, dynamically finding the shortest paths through the mesh
 - **Hybrid RSA/AES encryption** -- RSA for key exchange and simple chat messages, hybrid RSA/AES-GCM for file payload encryption
-- **PSS signature verification** on chat messages
-- **Windowed UDP file transfer** with acknowledgment, retransmit logic, and kernel-level buffer optimization
-- **Node dropout detection** via health checks and death packet propagation
+- **PSS signature verification** -- on chat messages
+- **Windowed UDP file transfer** -- with acknowledgment, retransmit logic, and kernel-level buffer optimization
+- **Node dropout detection** -- via health checks and death packet propagation
 - **Duplicate alias handling** -- conflicts detected and resolved automatically
 - **LAN broadcast mode**, **localhost mode**, and a **debug mode** that offers more feedback on certain operations
 - **Multi-hop routing** -- messages and files route through intermediate nodes
