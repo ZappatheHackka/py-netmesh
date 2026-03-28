@@ -8,7 +8,7 @@ A decentralized, peer-to-peer mesh network with end-to-end encrypted messaging a
 
 py-netmesh is an application-layer mesh network that runs entirely without a central server or routing authority. Nodes discover each other autonomously using a gossip protocol, build routing tables using distance vector routing, and communicate over encrypted channels using RSA/AES encryption. Any node can send messages or files to any other node in the mesh, routed through intermediate nodes.
 
-This project was built as an exercise in exploring mesh networking, cryptography, and custom file transfers from first principles.
+This project was built as an exercise in exploring mesh networking, cryptography, and custom file transfers.
 
 ---
 
